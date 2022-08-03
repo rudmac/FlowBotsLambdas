@@ -20,13 +20,20 @@ const dynamo = new AWS.DynamoDB.DocumentClient({
     service: dynamoDbConfig
 });
 
+const lambda = new AWS.Lambda({
+  apiVersion: "2015-03-31",
+  endpoint: `lambda.${region}.amazonaws.com`
+});
+
 const ConnectionTableName = process.env.DYNAMODB_TABLE_CONNECTION;
 const MachineIDTableName = process.env.DYNAMODB_TABLE_MACHINE_ID;
+const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
 const RetryTimes = process.env.RETRY_TIMES;
 const RetryDelay = process.env.RETRY_DELAY;
 const ECHO_ID = "@REP-TEST-ECHO";
 const OrderStatesToCheck = ["Submitted"/*, "ChangeSubmitted", "CancelSubmitted"*/];
 const MachineIDsBlackList = process.env.MACHINE_IDS_BLACK_LIST.split(',');
+const BroadcastChuncks = process.env.BROADCAST_CHUNKS;
 
 const re_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60}|)/;
 const re_assigned_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60})/;
@@ -85,6 +92,33 @@ function cleanAssignedMachineID(machine_id) {
         UserDefinedId: m[1].substring(1),
         AssignedMachineId: m.input
     };
+}
+
+async function sendToConnectionNEW(requestContext, connection_id, region, data, db = null) { // parece que é mais lento do que a função antiga
+    //let endpoint = requestContext.domainName + '/' + requestContext.stage;
+    const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
+    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${requestContext.stage}`;
+
+    const callbackAPI = new AWS.ApiGatewayManagementApi({
+        apiVersion: '2018-11-29',
+        endpoint: endpoint,
+        region
+    });
+
+    let ret = {};
+    try {
+        ret = await callbackAPI
+            .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
+            .promise();
+        
+            return { status: 200 };
+    } catch (e) {
+        console.error("sendToConnection Error", connection_id, ret, e);
+        return {
+            status: 504,
+            statusText: "WS Timeout"
+        };
+    }
 }
 
 async function sendToConnection(isProd, region, wsApiId, connection_id, data, db = null) {
@@ -204,6 +238,40 @@ function IsProd(context) {
     return is_Prod;
 }
 
+async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_id) {
+    try {
+        const data = await db.query({
+            TableName: BroadcastTableName,
+            KeyConditionExpression: "broadcast_list_id = :val1",
+            ProjectionExpression: "connection_ids, broadcast_id",
+            FilterExpression: "contains (owner_machine_ids, :val2)",
+            ExpressionAttributeValues: {
+                ":val1": broadcast_list_id,
+                ":val2": machine_id
+            },
+        }).promise();
+        
+        console.log(data);
+        
+        if (data.Count == 0) {
+            return undefined;
+        }
+
+        return {
+            connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : []),
+            broadcast_id: data.Items[0]["broadcast_id"]
+        };
+    } catch (error) {
+        console.error(error);
+        return undefined;
+    }
+}
+
+function arrayRemove(arr, value) { 
+    return arr.filter(function(ele){ 
+        return ele != value; 
+    });
+}
 
 var functions = [];
 
@@ -211,7 +279,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     //console.log('OnOrderUpdate', body);
 
     const trade = body.trade;
-    const nodes = [...new Set(body.nodes)].filter(function (e) { return e != null; });
+    let nodes = [...new Set(body.nodes)].filter(function (e) { return e != null; });
 
     if (nodes.length === 0) {
         return {
@@ -348,9 +416,61 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         }
     }
 
+    let nodes_status = [];
+
+    const broadcast_list = nodes.filter(function(n) { return n.startsWith("@LST") });
+    if (broadcast_list && broadcast_list.length > 0) {
+        let broadcast_promisses = [];
+        const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
+        const slice_size = parseInt(BroadcastChuncks, 10);
+        await Promise.all(broadcast_list.map(async (broadcast_list_id) => {
+            let followersConnections = await FollowersConnectionBroadcastList(db, broadcast_list_id, machine_id);
+            if (followersConnections === undefined) {
+                return;
+            }
+            const connections = followersConnections.connection_ids;
+            const broadcast_id = followersConnections.broadcast_id;
+            //console.log('Connections', connections);
+            console.log('Broadcast ID', broadcast_id);
+            console.log(`Invoking ${connections.length} connections with chunck of ${slice_size} for ${broadcast_list_id}`);
+            for (let i = 0; i < connections.length; i=i+slice_size) {
+                const connections_sliced = connections.slice(i, i+slice_size);
+                //console.log('Nodes connections:', connections_sliced);
+                console.log(`Slicing chunck ${i+1}-${Math.min(i+slice_size, connections.length)}`);
+                broadcast_promisses.push(lambda.invokeAsync({
+                    FunctionName,
+                    InvokeArgs: JSON.stringify({
+                        connections: connections_sliced,
+                        action: "trade",
+                        payload: trade,
+                        replikanto_version,
+                        broadcast_id,
+                        requestContext
+                    })
+                }).promise());
+            }
+        }));
+
+
+        let broadcast_status = "not broadcast";
+        if (broadcast_promisses.length > 0) {
+            console.log(`${FunctionName} broadcasting...`);
+            await Promise.all(broadcast_promisses);   
+            console.log(`${FunctionName} broadcast`);
+            broadcast_status = "broadcast";
+        }
+        
+        broadcast_list.map(async (node) => {
+            nodes = arrayRemove(nodes, node);
+            nodes_status.push({
+                node,
+                status: broadcast_status
+            });
+        });
+    }
+
     let promisses = [];
     let overspend = 0;
-    let nodes_status = [];
     for (var i = 0; i < nodes.length; i++) {
         let node = nodes[i];
         try {
@@ -405,6 +525,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                             wsApiId = process.env["WS_API_ID_" + regionFromDB.toUpperCase().replace(/-/g, "_")];
                         }
                         
+                        //const response = await sendToConnectionNEW(requestContext, connection_id, {
                         const response = await sendToConnection(isProd, regionFromDB, wsApiId, connection_id, {
                             action: "trade",
                             payload: trade,
@@ -466,7 +587,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             nodes_retry.push(node);
         }
     }
-    
+
     let responses = await Promise.all(promisses);
     //console.log(`Responses = ${responses}`);
     for(let r of responses) {
@@ -548,6 +669,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 wsApiId = process.env["WS_API_ID_" + regionFromDB.toUpperCase().replace(/-/g, "_")];
                             }
                             
+                            //const response = await sendToConnectionNEW(requestContext, connection_id, {
                             const response = await sendToConnection(isProd, regionFromDB, wsApiId, connection_id, {
                                 action: "trade",
                                 payload: trade,
