@@ -1,12 +1,11 @@
-
-const AWS = require('aws-sdk');
+const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
 
 async function sendToConnection(stage, connection_id, region, data) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
     const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
     let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
     //console.log(endpoint);
-    const callbackAPI = new AWS.ApiGatewayManagementApi({
+    const callbackAPI = new ApiGatewayManagementApi({
         apiVersion: '2018-11-29',
         endpoint: endpoint,
         region
@@ -57,7 +56,7 @@ exports.handler = async (event) => {
     //}));
     
     let responses = await Promise.all(promisses);
-    console.warn("Responses", responses);
+    console.log("Responses", responses);
 
     const response = {
         statusCode: 200,

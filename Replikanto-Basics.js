@@ -1,13 +1,14 @@
 "use strict";
 // Import the dependency.
 const fetchTimeout = require('fetch-timeout');
-var aws4  = require('aws4');
-const AWS = require('aws-sdk');
 var crypto = require('crypto');
+
+const DynamoDB = require('aws-sdk/clients/dynamodb');
+const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
 
 const region = process.env.AWS_REGION;
 
-const dynamoDbConfig = new AWS.DynamoDB({
+const dynamoDbConfig = new DynamoDB({
     maxRetries: 5, // Delays with maxRetries = 5: 30, 60, 120, 240, 480, 920
     retryDelayOptions: {
         base: 30
@@ -17,7 +18,7 @@ const dynamoDbConfig = new AWS.DynamoDB({
     }
 });
 
-const dynamo = new AWS.DynamoDB.DocumentClient({
+const dynamo = new DynamoDB.DocumentClient({
     service: dynamoDbConfig
 });
 
@@ -145,34 +146,37 @@ function CleanSignedMachineID(machine_id) {
     };
 }
 
-async function sendToConnection(isProd, region, connection_id, data) {
-    const wsApiIdVar = "WS_API_ID_" + region.toUpperCase().replace(/-/g, "_");
-    const wsApiId = process.env[wsApiIdVar];
-    let url = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${(isProd ? "production" : "development")}/@connections`;
+async function sendToConnection(requestContext, connection_id, region, data) { // parece que é mais lento do que a função antiga
+    //let endpoint = requestContext.domainName + '/' + requestContext.stage;
+    const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
+    if (region === undefined) {
+        region = "us-east-1";
+    }
+    let stage = requestContext.stage;
+    if (stage === "test-invoke-stage") {
+        stage = "development";
+    }
+    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
 
-    const urlObject = new URL(url);
-    
-    var opts = { 
-        method: 'POST',
-        path: url.replace(urlObject.protocol + "//" + urlObject.hostname, '') + `/${connection_id}`, 
-        //host: process.env.WS_API_ID + ".execute-api.us-east-1.amazonaws.com",//urlObject.hostname,
-        host: urlObject.hostname, 
-        service: 'execute-api', 
-        region: region,
-        headers: {
-            'Content-Type': 'application/json',
-            //'x-apigw-api-id': process.env.WS_API_ID
-        },
-        body: JSON.stringify(data)
-    };
-    aws4.sign(opts);
-    //console.log(process.env.WS_API_ID + ".execute-api.us-east-1.amazonaws.com");
-    //console.log(url.replace(urlObject.protocol + "//" + urlObject.hostname, '') + `/${connection_id}`);
-    //console.log(url + "/" + connection_id);
-    let ret = await fetchTimeout(url + "/" + connection_id, opts, process.env.WS_TIMEOUT, "WS Timeout");
-    //console.log(ret);
-    //console.log(ret.headers);
-    return ret;
+    const callbackAPI = new ApiGatewayManagementApi({
+        apiVersion: '2018-11-29',
+        endpoint: endpoint,
+        region
+    });
+
+    let ret = {};
+    try {
+        ret = await callbackAPI
+            .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
+            .promise();
+        return { status: 200 };
+    } catch (e) {
+        console.error("sendToConnection Error", connection_id, ret, e);
+        return {
+            status: e.statusCode,
+            statusText: e.code
+        };
+    }
 }
 
 function compareVersion(version, major, minor, build = 0, revision = 0) {
@@ -494,9 +498,9 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         }
     }
     
-    //if (MachineIDsBlackList.includes(machine_id)) {
-        //return false;
-    //}
+    if (MachineIDsBlackList.includes(machine_id)) { // Tem tbm um trecho verificando o blacklist no Flow
+        return false;
+    }
     
     let license_type            = undefined;
     try {
@@ -1238,11 +1242,7 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
     }).promise();
     
     for (let i = 0; i < dataConnection.Count; i++) {
-        let regionFromDB = dataConnection.Items[i].region;
-        if (regionFromDB === undefined) {
-            regionFromDB = "us-east-1";
-        }
-        const response = await sendToConnection(isProd, regionFromDB, dataConnection.Items[i].connection_id, {
+        let ret_to_send = await sendToConnection(requestContext, dataConnection.Items[i].connection_id, dataConnection.Items[i].region, {
             action: "credit",
             payload: {
                 status: "credited",
@@ -1251,6 +1251,9 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
                 credit
             }
         });
+        if (ret_to_send.status !== 200) {
+            console.warn(ret_to_send);
+        }
     }
 
     return {

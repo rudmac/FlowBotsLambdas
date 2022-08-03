@@ -1,12 +1,13 @@
 "use strict";
 // Import the dependency.
-const fetchTimeout = require('fetch-timeout');
-var aws4  = require('aws4');
-const AWS = require('aws-sdk');
+
+const DynamoDB = require('aws-sdk/clients/dynamodb');
+const Lambda = require('aws-sdk/clients/lambda');
+const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
 
 const region = process.env.AWS_REGION;
 
-const dynamoDbConfig = new AWS.DynamoDB({
+const dynamoDbConfig = new DynamoDB({
     maxRetries: 5, // Delays with maxRetries = 5: 30, 60, 120, 240, 480, 920
     retryDelayOptions: {
         base: 30
@@ -16,11 +17,11 @@ const dynamoDbConfig = new AWS.DynamoDB({
     }
 });
 
-const dynamo = new AWS.DynamoDB.DocumentClient({
+const dynamo = new DynamoDB.DocumentClient({
     service: dynamoDbConfig
 });
 
-const lambda = new AWS.Lambda({
+const lambda = new Lambda({
   apiVersion: "2015-03-31",
   endpoint: `lambda.${region}.amazonaws.com`
 });
@@ -94,12 +95,19 @@ function cleanAssignedMachineID(machine_id) {
     };
 }
 
-async function sendToConnectionNEW(requestContext, connection_id, region, data, db = null) { // parece que é mais lento do que a função antiga
+async function sendToConnection(requestContext, connection_id, region, data) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
     const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
-    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${requestContext.stage}`;
+    if (region === undefined) {
+        region = "us-east-1";
+    }
+    let stage = requestContext.stage;
+    if (stage === "test-invoke-stage") {
+        stage = "development";
+    }
+    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
 
-    const callbackAPI = new AWS.ApiGatewayManagementApi({
+    const callbackAPI = new ApiGatewayManagementApi({
         apiVersion: '2018-11-29',
         endpoint: endpoint,
         region
@@ -110,62 +118,12 @@ async function sendToConnectionNEW(requestContext, connection_id, region, data, 
         ret = await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
-        
-            return { status: 200 };
+        return { status: 200 };
     } catch (e) {
         console.error("sendToConnection Error", connection_id, ret, e);
         return {
-            status: 504,
-            statusText: "WS Timeout"
-        };
-    }
-}
-
-async function sendToConnection(isProd, region, wsApiId, connection_id, data, db = null) {
-    let url = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${(isProd ? "production" : "development")}/@connections`;
-
-    const urlObject = new URL(url);
-    
-    var opts = { 
-        method: 'POST',
-        path: url.replace(urlObject.protocol + "//" + urlObject.hostname, '') + `/${connection_id}`, 
-        //host: process.env.WS_API_ID + ".execute-api.us-east-1.amazonaws.com",//urlObject.hostname,
-        host: urlObject.hostname,
-        service: 'execute-api',
-        headers: {
-            'Content-Type': 'application/json',
-            //'x-apigw-api-id': process.env.WS_API_ID
-        },
-        body: JSON.stringify(data)
-    };
-    aws4.sign(opts);
-    //console.log(process.env.WS_API_ID + ".execute-api.us-east-1.amazonaws.com");
-    //console.log(url.replace(urlObject.protocol + "//" + urlObject.hostname, '') + `/${connection_id}`);
-    //console.log(url + "/" + connection_id);
-    try {
-        let ret = await fetchTimeout(url + "/" + connection_id, opts, process.env.WS_TIMEOUT, "WS Timeout");
-        //console.log(ret);
-        //console.log(ret.headers);
-        if (ret.status === 410 && ret.statusText === 'Gone' && db !== null) {
-            try {
-                await db
-                    .delete({
-                        TableName: ConnectionTableName,
-                        Key: {
-                            connection_id,
-                        }
-                    })
-                    .promise();
-            } catch (error) {
-                // ignored
-            }
-        }
-        return ret;
-    } catch (error) {
-        console.log(error);
-        return {
-            status: 504,
-            statusText: "WS Timeout"
+            status: e.statusCode,
+            statusText: e.code
         };
     }
 }
@@ -251,15 +209,15 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_i
             },
         }).promise();
         
-        console.log(data);
+        //console.log(data);
         
         if (data.Count == 0) {
             return undefined;
         }
 
         return {
-            connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : []),
-            broadcast_id: data.Items[0]["broadcast_id"]
+            broadcast_id: data.Items[0]["broadcast_id"],
+            connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : [])
         };
     } catch (error) {
         console.error(error);
@@ -357,18 +315,79 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             //}
         }
     }
-    
+
     const orderState = trade.orderState;
 
     let credits = 0;
     let beforeCredit = 0;
     let hasCreditsChanged = false;
+
+    let nodes_status = [];
+    let broacast_connections_count = 0;
+
+    const broadcast_list = nodes.filter(function(n) { return n.startsWith("@LST") });
+    if (broadcast_list !== undefined && broadcast_list.length > 0) {
+        let broadcast_promisses = [];
+        const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
+        const slice_size = parseInt(BroadcastChuncks, 10);
+        await Promise.all(broadcast_list.map(async (broadcast_list_id) => {
+            let followersConnections = await FollowersConnectionBroadcastList(db, broadcast_list_id, machine_id);
+            if (followersConnections === undefined) {
+                return;
+            }
+            const connections = followersConnections.connection_ids;
+            const broadcast_id = followersConnections.broadcast_id;
+
+            broacast_connections_count += connections.length;
+
+            //console.log('Connections', connections);
+            console.log('Broadcast ID', broadcast_id);
+            console.log(`Invoking ${connections.length} connections with chunck of ${slice_size} for ${broadcast_list_id}`);
+            for (let i = 0; i < connections.length; i=i+slice_size) {
+                const connections_sliced = connections.slice(i, i+slice_size);
+                //console.log('Nodes connections:', connections_sliced);
+                console.log(`Slicing chunck ${i+1}-${Math.min(i+slice_size, connections.length)}`);
+                broadcast_promisses.push(lambda.invokeAsync({
+                    FunctionName,
+                    InvokeArgs: JSON.stringify({
+                        connections: connections_sliced,
+                        action: "trade",
+                        payload: trade,
+                        replikanto_version,
+                        broadcast_id,
+                        requestContext
+                    })
+                }).promise());
+            }
+        }));
+
+
+        let broadcast_status = "not broadcast";
+        if (broadcast_promisses.length > 0) {
+            console.log(`${FunctionName} broadcasting...`);
+            await Promise.all(broadcast_promisses);   
+            console.log(`${FunctionName} broadcast`);
+            broadcast_status = "broadcast";
+        }
+        
+        broadcast_list.map(async (node) => {
+            nodes = arrayRemove(nodes, node);
+            nodes_status.push({
+                node,
+                status: broadcast_status
+            });
+        });
+    }
+
     //if (orderState === "Submitted" || orderState === "ChangeSubmitted" || orderState === "CancelSubmitted") {
     if (OrderStatesToCheck.includes(orderState)) {
         if (!(nodes.length === 1 && nodes[0] === ECHO_ID)) {
             try {
                 let nodesToCalc = nodes.filter(item => item !== ECHO_ID);
                 let debitedCredit = nodesToCalc.length;
+                if (broadcast_list.length > 0) {
+                    debitedCredit += broacast_connections_count
+                }
                 //console.log(debitedCredit);
                 //console.log('onorderupdate db.update 1');
                 let updateRet = await db.update({
@@ -416,59 +435,6 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         }
     }
 
-    let nodes_status = [];
-
-    const broadcast_list = nodes.filter(function(n) { return n.startsWith("@LST") });
-    if (broadcast_list && broadcast_list.length > 0) {
-        let broadcast_promisses = [];
-        const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
-        const slice_size = parseInt(BroadcastChuncks, 10);
-        await Promise.all(broadcast_list.map(async (broadcast_list_id) => {
-            let followersConnections = await FollowersConnectionBroadcastList(db, broadcast_list_id, machine_id);
-            if (followersConnections === undefined) {
-                return;
-            }
-            const connections = followersConnections.connection_ids;
-            const broadcast_id = followersConnections.broadcast_id;
-            //console.log('Connections', connections);
-            console.log('Broadcast ID', broadcast_id);
-            console.log(`Invoking ${connections.length} connections with chunck of ${slice_size} for ${broadcast_list_id}`);
-            for (let i = 0; i < connections.length; i=i+slice_size) {
-                const connections_sliced = connections.slice(i, i+slice_size);
-                //console.log('Nodes connections:', connections_sliced);
-                console.log(`Slicing chunck ${i+1}-${Math.min(i+slice_size, connections.length)}`);
-                broadcast_promisses.push(lambda.invokeAsync({
-                    FunctionName,
-                    InvokeArgs: JSON.stringify({
-                        connections: connections_sliced,
-                        action: "trade",
-                        payload: trade,
-                        replikanto_version,
-                        broadcast_id,
-                        requestContext
-                    })
-                }).promise());
-            }
-        }));
-
-
-        let broadcast_status = "not broadcast";
-        if (broadcast_promisses.length > 0) {
-            console.log(`${FunctionName} broadcasting...`);
-            await Promise.all(broadcast_promisses);   
-            console.log(`${FunctionName} broadcast`);
-            broadcast_status = "broadcast";
-        }
-        
-        broadcast_list.map(async (node) => {
-            nodes = arrayRemove(nodes, node);
-            nodes_status.push({
-                node,
-                status: broadcast_status
-            });
-        });
-    }
-
     let promisses = [];
     let overspend = 0;
     for (var i = 0; i < nodes.length; i++) {
@@ -508,33 +474,18 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             const items = data.Items;
             for (const item of items) { // Pode vir mais que 1 conexão, pois pode haver clone da VM e ter o mesmo machineID.
                 let promise = new Promise(async (resolve, reject) => {
-            
                     //console.log("item", item);
                     const connection_id = item.connection_id;
-                    let regionFromDB = item.region;
-                    if (regionFromDB === undefined) {
-                        regionFromDB = "us-east-1";
-                    }
                     try {
-                        //console.log(`sendToConnection = ${connection_id}`);
+                        //console.log(`sendToConnection 1 = ${connection_id}`);
                         //console.log('onorderupdate sendToConnection 1');
-                        let wsApiId;
-                        if (node === ECHO_ID) {
-                            wsApiId = process.env.WS_UNSEC_API_ID_US_EAST_1;
-                        } else {
-                            wsApiId = process.env["WS_API_ID_" + regionFromDB.toUpperCase().replace(/-/g, "_")];
-                        }
-                        
-                        //const response = await sendToConnectionNEW(requestContext, connection_id, {
-                        const response = await sendToConnection(isProd, regionFromDB, wsApiId, connection_id, {
+                        const response = await sendToConnection(requestContext, connection_id, item.region, {
                             action: "trade",
                             payload: trade,
                             replikanto_version
-                        }, db);
-        
+                        });
                         //console.log(response);
                         //console.log(`sendToConnection = ${response.status}`);
-        
                         //console.log(url + "/" + connection_id, response.status);
                         if (response.status === 200) {
                             // mensagem de trade enviada
@@ -651,30 +602,19 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 
                 //console.log('onorderupdate getConnetionID 2');
                 const data = await getConnetionID(db, node, requestContext.connectionId);
+                console.log(data);
                 if (data.Count > 0) {
                     const items = data.Items;
                     for (const item of items) {
                         const connection_id = item.connection_id;
-                        let regionFromDB = item.region;
-                        if (regionFromDB === undefined) {
-                            regionFromDB = "us-east-1";
-                        }
                         if (requestContext.connectionId !== connection_id) {
+                            //console.log(`sendToConnection 2 = ${connection_id}`);
                             //console.log('onorderupdate sendToConnection 2');
-                            
-                            let wsApiId;
-                            if (node === ECHO_ID) {
-                                wsApiId = process.env.WS_UNSEC_API_ID_US_EAST_1;
-                            } else {
-                                wsApiId = process.env["WS_API_ID_" + regionFromDB.toUpperCase().replace(/-/g, "_")];
-                            }
-                            
-                            //const response = await sendToConnectionNEW(requestContext, connection_id, {
-                            const response = await sendToConnection(isProd, regionFromDB, wsApiId, connection_id, {
+                            const response = await sendToConnection(requestContext, connection_id, item.region, {
                                 action: "trade",
                                 payload: trade,
                                 replikanto_version
-                            }, db);
+                            });
                             if (response.status === 200) {
                                 nodes_status.push({
                                     node,
@@ -770,7 +710,7 @@ exports.handler = async (event, context) => {
             throw "Invalid function call";
         } else {
             const isProd = IsProd(context);
-            
+
             //let client;
             //if (isProd) {
                 //client = await MongoDB.prod;

@@ -1,8 +1,10 @@
-const AWS = require('aws-sdk');
+const DynamoDB = require('aws-sdk/clients/dynamodb');
 
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
+const UseChache = (process.env.USE_CACHE === 'true');
+const CacheLiveMinutes = parseInt(process.env.CACHE_LIVE_MINUTES, 10);
 
-const dynamoDbConfig = new AWS.DynamoDB({
+const dynamoDbConfig = new DynamoDB({
     maxRetries: 5, // Delays with maxRetries = 5: 30, 60, 120, 240, 480, 920
     retryDelayOptions: {
         base: 30
@@ -12,29 +14,57 @@ const dynamoDbConfig = new AWS.DynamoDB({
     }
 });
 
-const dynamo = new AWS.DynamoDB.DocumentClient({
+const dynamo = new DynamoDB.DocumentClient({
     service: dynamoDbConfig
 });
 
+let broadcast_list_cached = undefined;
+let cache_datetime = undefined;
 
 async function BroadcastList(db, machine_id) {
     try {
-        const data = await db.scan({
-            TableName: BroadcastTableName,
-            ProjectionExpression: "broadcast_list_id",
-            FilterExpression: "contains (followers_machine_ids, :val)",
-            ExpressionAttributeValues: {
-                ":val": machine_id
-            },
-        }).promise();
+        if (UseChache && cache_datetime !== undefined && (new Date().getTime() - cache_datetime) >= 1000 * 60 * CacheLiveMinutes) { // A cada N minutos
+            broadcast_list_cached = undefined;
+            console.log("Cache cleared");
+        }
+        if (UseChache && broadcast_list_cached !== undefined) {
+            let cached_list = [];
+            for (let i = 0; i < broadcast_list_cached.length; i++) {
+                if (broadcast_list_cached[i].broadcast_list_id !== "" && broadcast_list_cached[i].followers_machine_ids.indexOf(machine_id) > -1) {
+                    cached_list.push(broadcast_list_cached[i].broadcast_list_id);
+                }
+            }
+            console.log("Return BroadcastList from cache", cached_list);
+            return cached_list;
+        } else {
+            if (UseChache) {
+                broadcast_list_cached = [];
+            }
 
-        let list = [];
-        
-        data.Items.forEach(function(element, index, array) {
-            list.push(element.broadcast_list_id);
-        });
+            const data = await db.scan({
+                TableName: BroadcastTableName,
+                ProjectionExpression: "broadcast_list_id, followers_machine_ids"
+            }).promise();
 
-        return list;
+            let list = [];
+            
+            data.Items.forEach(function(element) {
+                if (UseChache) {
+                    broadcast_list_cached.push({
+                        broadcast_list_id: element.broadcast_list_id,
+                        followers_machine_ids: element.followers_machine_ids.values
+                    });
+                }
+                if (element.followers_machine_ids.values.indexOf(machine_id) > -1) {
+                    list.push(element.broadcast_list_id);
+                }
+            });
+            if (data.Items.length > 0) {
+                cache_datetime = new Date().getTime();
+            }
+            console.log("Return BroadcastList from database", list);
+            return list;
+        }
     } catch (error) {
         console.error(error);
         return [];
@@ -79,8 +109,24 @@ async function RemoveConnectionBroadcastList(db, broadcast_list_id, connection_i
 
 exports.handler = async (event) => {
     console.log(event);
-    const event_name = event.Records[0].eventName; // REMOVE and INSERT
+    const eventSourceARN = event.Records[0].eventSourceARN;
     const dynamobd = event.Records[0].dynamodb;
+
+    /*
+    if (eventSourceARN.search(BroadcastTableName) > -1) { // Não funciona, pois aqui vem quando é adicionado as conexões e tem outros lambdas carregados com cache...
+        if (UseChache) { // Clean the cache
+            console.log(dynamobd);
+            broadcast_list_cached = undefined;
+            console.log("Cache cleared");
+        }
+        return {
+            statusCode: 200,
+            body: JSON.stringify({}),
+        };
+    }
+    */
+
+    const event_name = event.Records[0].eventName; // REMOVE and INSERT
     const connection_id = dynamobd.Keys.connection_id.S;
     const db = dynamo;
     
@@ -94,7 +140,7 @@ exports.handler = async (event) => {
         region = dynamobd.NewImage.region.S;
     }
     
-    let broadcast_list = await BroadcastList(db, machine_id);
+    const broadcast_list = await BroadcastList(db, machine_id);
     //console.log(broadcast_list);
     for (let i = 0; i < broadcast_list.length; i++) {
         const broadcast_list_id = broadcast_list[i];
