@@ -108,53 +108,50 @@ async function RemoveConnectionBroadcastList(db, broadcast_list_id, connection_i
 }
 
 exports.handler = async (event) => {
-    console.log(event);
-    const eventSourceARN = event.Records[0].eventSourceARN;
-    const dynamobd = event.Records[0].dynamodb;
+    //console.log(event);
+    //console.log(event.Records);
 
-    /*
-    if (eventSourceARN.search(BroadcastTableName) > -1) { // Não funciona, pois aqui vem quando é adicionado as conexões e tem outros lambdas carregados com cache...
-        if (UseChache) { // Clean the cache
-            console.log(dynamobd);
-            broadcast_list_cached = undefined;
-            console.log("Cache cleared");
-        }
-        return {
-            statusCode: 200,
-            body: JSON.stringify({}),
-        };
-    }
-    */
+    for (let i = 0; i < event.Records.length; i++) {
+        const record = event.Records[i];
 
-    const event_name = event.Records[0].eventName; // REMOVE and INSERT
-    const connection_id = dynamobd.Keys.connection_id.S;
-    const db = dynamo;
-    
-    let region = undefined;
-    let machine_id = undefined;
-    if (event_name === "REMOVE") {
-        machine_id = dynamobd.OldImage.machine_id.S;
-        region = dynamobd.OldImage.region.S;
-    } else if (event_name === "INSERT") {
-        machine_id = dynamobd.NewImage.machine_id.S;
-        region = dynamobd.NewImage.region.S;
-    }
-    
-    const broadcast_list = await BroadcastList(db, machine_id);
-    //console.log(broadcast_list);
-    for (let i = 0; i < broadcast_list.length; i++) {
-        const broadcast_list_id = broadcast_list[i];
-        if (event_name === "INSERT") {
-            console.log(event_name, broadcast_list_id, connection_id);
-            await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
-            //console.log("done");
-        } else if (event_name === "REMOVE") {
-            console.log(event_name, broadcast_list_id, connection_id);
-            await RemoveConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
-            //console.log("done");
+        const dynamobd = record.dynamodb;
+        const event_name = record.eventName; // REMOVE and INSERT
+        const connection_id = dynamobd.Keys.connection_id.S;
+        const db = dynamo;
+        
+        let region = undefined;
+        let machine_id = undefined;
+        if (event_name === "REMOVE") {
+            machine_id = dynamobd.OldImage.machine_id.S;
+            region = dynamobd.OldImage.region.S;
+        } else if (event_name === "INSERT") {
+            machine_id = dynamobd.NewImage.machine_id.S;
+            region = dynamobd.NewImage.region.S;
+        } else {
+            console.log(event_name, "undefined");
+            continue;
         }
-    }
-    //console.log(event_name, dynamobd, connection_id, machine_id);
+        
+        const broadcast_list = await BroadcastList(db, machine_id);
+        //console.log(broadcast_list);
+        if (broadcast_list.length > 0) {
+            for (let i = 0; i < broadcast_list.length; i++) {
+                const broadcast_list_id = broadcast_list[i];
+                if (event_name === "INSERT") {
+                    console.log(event_name, broadcast_list_id, connection_id, region);
+                    await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
+                    //console.log("done");
+                } else if (event_name === "REMOVE") {
+                    console.log(event_name, broadcast_list_id, connection_id, region);
+                    await RemoveConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
+                    //console.log("done");
+                }
+            }
+        } else {
+            console.log(event_name, "Empty Broadcast List", connection_id, region);
+        }
+        //console.log(event_name, dynamobd, connection_id, machine_id);
+    };
 
     const response = {
         statusCode: 200,
