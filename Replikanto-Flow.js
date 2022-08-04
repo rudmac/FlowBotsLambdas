@@ -1,6 +1,5 @@
 "use strict";
 // Import the dependency.
-
 const DynamoDB = require('aws-sdk/clients/dynamodb');
 const Lambda = require('aws-sdk/clients/lambda');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
@@ -103,7 +102,7 @@ async function sendToConnection(requestContext, connection_id, region, data) { /
     }
     let stage = requestContext.stage;
     if (stage === "test-invoke-stage") {
-        stage = "development";
+        stage = "dev";
     }
     let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
 
@@ -120,7 +119,7 @@ async function sendToConnection(requestContext, connection_id, region, data) { /
             .promise();
         return { status: 200 };
     } catch (e) {
-        console.error("sendToConnection Error", connection_id, ret, e);
+        console.error(connection_id, e.code, e.statusCode);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -237,7 +236,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     //console.log('OnOrderUpdate', body);
 
     const trade = body.trade;
-    let nodes = [...new Set(body.nodes)].filter(function (e) { return e != null; });
+    let nodes   = [...new Set(body.nodes)].filter(function (e) { return e != null; });
 
     if (nodes.length === 0) {
         return {
@@ -354,6 +353,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                         action: "trade",
                         payload: trade,
                         replikanto_version,
+                        broadcast_list_id,
                         broadcast_id,
                         requestContext
                     })
@@ -493,8 +493,15 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 node,
                                 status: 'sent'
                             });
-                        } else if (response.status === 403) {
+                        } else if (response.status === 403) { // Forbidden
                             //console.log(response);
+                            resolve({
+                                node,
+                                status: "error",
+                                msg: response.statusText
+                            });
+                        } else if (response.status === 410) { // GoneException
+                            // TODO Remove connection id from ConnectionRelation
                             resolve({
                                 node,
                                 status: "error",
@@ -602,7 +609,6 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 
                 //console.log('onorderupdate getConnetionID 2');
                 const data = await getConnetionID(db, node, requestContext.connectionId);
-                console.log(data);
                 if (data.Count > 0) {
                     const items = data.Items;
                     for (const item of items) {
@@ -710,7 +716,7 @@ exports.handler = async (event, context) => {
             throw "Invalid function call";
         } else {
             const isProd = IsProd(context);
-
+            
             //let client;
             //if (isProd) {
                 //client = await MongoDB.prod;
