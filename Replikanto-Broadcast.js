@@ -104,7 +104,7 @@ exports.handler = async (event) => {
             console.info("Removing", e.connection_id, "follower from list", broadcast_list_id);
             await RemoveConnectionBroadcastList(broadcast_list_id, e.connection_id, e.region);
         } else {
-            console.error("Undefined Error", e, broadcast_list_id);
+            console.error("Undefined Error", e);
         }
     }
 
