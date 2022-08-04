@@ -112,9 +112,8 @@ async function sendToConnection(requestContext, connection_id, region, data) { /
         region
     });
 
-    let ret = {};
     try {
-        ret = await callbackAPI
+        await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
         return { status: 200 };

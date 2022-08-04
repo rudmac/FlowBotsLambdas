@@ -5,7 +5,6 @@ var crypto = require('crypto');
 
 const DynamoDB = require('aws-sdk/clients/dynamodb');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
-
 const region = process.env.AWS_REGION;
 
 const dynamoDbConfig = new DynamoDB({
@@ -154,7 +153,7 @@ async function sendToConnection(requestContext, connection_id, region, data) { /
     }
     let stage = requestContext.stage;
     if (stage === "test-invoke-stage") {
-        stage = "development";
+        stage = "dev";
     }
     let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
 
@@ -164,14 +163,13 @@ async function sendToConnection(requestContext, connection_id, region, data) { /
         region
     });
 
-    let ret = {};
     try {
-        ret = await callbackAPI
+        await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
         return { status: 200 };
     } catch (e) {
-        console.error("sendToConnection Error", connection_id, ret, e);
+        console.error(connection_id, e.code, e.statusCode);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -610,17 +608,17 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
     //console.log(body);
     let machine_id;
     let assigned_machine_id;
-    let unsigned_machine_id;
+    //let unsigned_machine_id;
     try {
         assigned_machine_id = CleanSignedMachineID(body.machine_id);
         if (await UpdateDataBase(db, assigned_machine_id)) {
             console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
         }
         machine_id = assigned_machine_id.AssignedMachineId;
-        unsigned_machine_id = assigned_machine_id.MachineId;
+        //unsigned_machine_id = assigned_machine_id.MachineId;
     } catch (error) {
         machine_id = CleanMachineID(body.machine_id);
-        unsigned_machine_id = machine_id;
+        //unsigned_machine_id = machine_id;
         // Verificar se não fez um downgrade de versão e voltou a ter um machine ID unassigned
         const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
         if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
@@ -693,8 +691,8 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
         replikanto_id = data.Items[0].replikanto_id;
     }
 
+    // The same code as above is listed in change_machine_id method, if you change it here, please change it there
     let broadcast_list = await BroadcastList(db, machine_id);
-
     return {
         action: "node_info",
         payload: {
@@ -710,8 +708,6 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
  **/
 functions.change_machine_id = async function(headers, paths, requestContext, body, db, isProd) {
     let old_unsigned_machine_id = undefined, unsigned_machine_id = undefined;
-    let old_signed_machine_id = undefined, signed_machine_id = undefined;
-    
     try {
         old_unsigned_machine_id = CleanMachineID(paths.machine_id);
         unsigned_machine_id = CleanMachineID(body.machine_id);
@@ -728,6 +724,8 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
             }
         };
     }
+
+    let old_signed_machine_id = undefined, signed_machine_id = undefined;
     try {
         old_signed_machine_id = CleanSignedMachineID(paths.machine_id);
         console.log("Old signed machine id", old_signed_machine_id);
@@ -743,12 +741,12 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
             action: "change_machine_id",
             payload: {
                 status: "error",
-                msg: "Unsigned Machine ID"
+                msg: error
             }
         };
     }
     
-    const old_machine_id_to_check = old_signed_machine_id == undefined ? old_unsigned_machine_id : old_signed_machine_id.AssignedMachineId;
+    const old_machine_id_to_check = old_signed_machine_id === undefined ? old_unsigned_machine_id : old_signed_machine_id.AssignedMachineId;
     const machine_id_to_check = signed_machine_id.AssignedMachineId;
     
     if (old_machine_id_to_check === machine_id_to_check) {
@@ -756,23 +754,28 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
             action: "change_machine_id",
             payload: {
                 status: "error",
-                msg: "It is not possible to modify two identical machine IDs"
+                msg: "It is not possible to modify two identical Machine IDs"
             }
         };
     }
 
     try {
-        let machined_id_to_find = old_unsigned_machine_id;
-        if (old_signed_machine_id != undefined) {
-            machined_id_to_find = old_signed_machine_id.AssignedMachineId;
+        // Find the broadcast list follower/owner old machine ID and then change it.
+        if (await BroadcastChangeMachineIDInfo(db, old_machine_id_to_check, machine_id_to_check, true)) {
+            console.info("Added " + machine_id_to_check + " to the broadcast list");
+            console.info("Removed " + old_machine_id_to_check + " to the broadcast list");
         }
-        
+    } catch (error) {
+        console.error("" + error);
+    }
+
+    try {
         var params_to_find_old_machine_id = {
             TableName: MachineIDTableName,
             ProjectionExpression: "replikanto_id, credits, bkp, last_update",
             KeyConditionExpression: "machine_id = :val",
             ExpressionAttributeValues: {
-                ":val": machined_id_to_find
+                ":val": old_machine_id_to_check
             }
         };
         
@@ -780,7 +783,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
         
         let msg = "";
         let status = "changed";
-        if (data_old_machine_id.Count >= 1) {
+        if (data_old_machine_id.Count == 1) {
             // found the old machine id relation
             const old_replikanto_id = data_old_machine_id.Items[0].replikanto_id;
             const old_credits = data_old_machine_id.Items[0].credits;
@@ -788,7 +791,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
             const old_last_update = data_old_machine_id.Items[0].last_update;
 
             const new_bkp = {
-                machine_id: machined_id_to_find,
+                machine_id: old_machine_id_to_check,
                 replikanto_id: old_replikanto_id,
                 credits: old_credits,
                 last_update: old_last_update
@@ -799,13 +802,13 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                 ProjectionExpression: "replikanto_id, credits, bkp, last_update",
                 KeyConditionExpression: "machine_id = :val",
                 ExpressionAttributeValues: {
-                    ":val": signed_machine_id.AssignedMachineId
+                    ":val": machine_id_to_check
                 }
             };
             
             let data_new_machine_id = await db.query(params_to_find_new_machine_id).promise();
             
-            if (data_new_machine_id.Count >= 1) {
+            if (data_new_machine_id.Count == 1) {
                 const new_replikanto_id = data_new_machine_id.Items[0].replikanto_id;
                 const new_credits = data_new_machine_id.Items[0].credits;
                 const new_last_update = data_new_machine_id.Items[0].last_update;
@@ -824,75 +827,72 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                 var params_to_find_new_machine_id_connected = {
                     TableName: ConnectionTableName,
                     IndexName: "MachineID",
-                    ProjectionExpression: "replikanto_id",
+                    ProjectionExpression: "connection_id, #region_name, replikanto_id",
                     KeyConditionExpression: "machine_id = :val",
                     ExpressionAttributeValues: {
-                        ":val": signed_machine_id.AssignedMachineId
+                        ":val": machine_id_to_check
+                    },
+                    ExpressionAttributeNames: {
+                        "#region_name": "region"
                     }
                 };
-                
+                let restart_msg = undefined;
                 let data_new_machine_id_connected = await db.query(params_to_find_new_machine_id_connected).promise();
-                
-                if (data_new_machine_id_connected.Count >= 1) {
-                    // Se estiver conectado então não tem como mudar o @REP id, então vai ser guardado no bkp
+                if (data_new_machine_id_connected.Count == 1) {
+                    // Se estiver conectado vamos mudar o @REP id mesmo assim, e será guardado no bkp o recém criado
                     const actual_replikanto_id = data_new_machine_id_connected.Items[0].replikanto_id;
+                    const connection_id = data_new_machine_id_connected.Items[0].connection_id;
+                    const region = data_new_machine_id_connected.Items[0].region;
 
-                    if (actual_replikanto_id !== new_replikanto_id) {
-                        console.warn(`Connected machined id ${signed_machine_id.AssignedMachineId} has replikanto id ${actual_replikanto_id} different from machine id relation table that has replikanto id ${new_replikanto_id}`);
+                    console.warn(`The new machine id ${machine_id_to_check} is connected without changing the machine id, so the newly created Replikanto ID ${actual_replikanto_id} will be replaced by the old good one ${old_replikanto_id} in both tables`);
+
+                    await db.update({
+                        TableName: ConnectionTableName,
+                        Key: { connection_id },
+                        UpdateExpression: "set replikanto_id = :val1",
+                        ExpressionAttributeValues: { ":val1": old_replikanto_id },
+                        ReturnValues: "NONE"
+                    }).promise();
+
+                    try {
+                        // nodeinfo
+                        let broadcast_list = await BroadcastList(db, machine_id_to_check);
+                        await sendToConnection(requestContext, connection_id, region, {
+                            action: "node_info",
+                            payload: {
+                                replikanto_id : old_replikanto_id,
+                                credits: old_credits,
+                                broadcast_list
+                            }
+                        });
+                    } catch (e) {
+                        console.error(e);
+                        restart_msg = "Please restart Ninjatrader";
                     }
-
-                    msg = `Changing to a new Machine ID was successful. Replikanto ID ${old_replikanto_id} was not kept for the old machined id ${machined_id_to_find}, the newly created Replikanto ID ${new_replikanto_id} is active`;
-                    console.warn(msg);
-
-                    new_backup.push({
-                        machine_id: signed_machine_id.AssignedMachineId,
-                        replikanto_id: old_replikanto_id,
-                        credits: new_credits,
-                        last_update: new_last_update,
-                        msg
-                    });
-
-                    await db.update({
-                        TableName: MachineIDTableName,
-                        Key: { machine_id: signed_machine_id.AssignedMachineId },
-                        ExpressionAttributeValues: { ":val1": new_backup, ":val2": old_credits, ":val3": new Date().getTime(), ":val4": signed_machine_id.MachineId },
-                        UpdateExpression: "set bkp = :val1, credits = :val2, last_update = :val3, unassigned_machine_id = :val4",
-                        ReturnValues: "NONE"
-                    }).promise();
-                    
-                    // Aqui houve mudança do Replikanto ID do usuário.
-                    
-                    // TODO Enviar um NodeInfo para o usuário, e fazer a mudança de machine ID para o id antigo.
-                } else {
-                    // Se não estiver conectado então é possível mudar o @REP id
-                    msg = `Changing to a new Machine ID was successful. Replikanto ID ${old_replikanto_id} was kept from old machined id ${machined_id_to_find}, the newly created Replikanto ID ${new_replikanto_id} is saved in bkp attibute`;
-                    console.info(msg);
-                    
-                    new_backup.push({
-                        machine_id: signed_machine_id.AssignedMachineId,
-                        replikanto_id: new_replikanto_id,
-                        credits: new_credits,
-                        last_update: new_last_update,
-                        msg
-                    });
-
-                    await db.update({
-                        TableName: MachineIDTableName,
-                        Key: { machine_id: signed_machine_id.AssignedMachineId },
-                        ExpressionAttributeValues: { ":val1": new_backup, ":val2": old_replikanto_id, ":val3": old_credits, ":val4": new Date().getTime(), ":val5": signed_machine_id.MachineId },
-                        UpdateExpression: "set bkp = :val1, replikanto_id = :val2, credits = :val3, last_update = :val4, unassigned_machine_id = :val5",
-                        ReturnValues: "NONE"
-                    }).promise();
-                    
-                    // next time the user is connected, it will have the new replikanto id
                 }
-                // Apagar o old que não serve para mais nada
-                await db.delete({
+                
+                new_backup.push({
+                    machine_id: machine_id_to_check,
+                    replikanto_id: new_replikanto_id,
+                    credits: new_credits,
+                    last_update: new_last_update,
+                    msg
+                });
+
+                await db.update({
                     TableName: MachineIDTableName,
-                    Key: {
-                        machine_id : machined_id_to_find
-                    }
+                    Key: { machine_id: machine_id_to_check },
+                    ExpressionAttributeValues: { ":val1": new_backup, ":val2": old_replikanto_id, ":val3": old_credits, ":val4": new Date().getTime(), ":val5": signed_machine_id.MachineId },
+                    UpdateExpression: "set bkp = :val1, replikanto_id = :val2, credits = :val3, last_update = :val4, unassigned_machine_id = :val5",
+                    ReturnValues: "NONE"
                 }).promise();
+
+                console.info(`Machine ID change was successful. The old good Replikanto ID ${old_replikanto_id} was kept from the old machined id ${old_machine_id_to_check}, the newly created Replikanto ID ${new_replikanto_id} is saved in bkp attibute`);
+
+                msg = `Machine ID change was successful.\nYour Replikanto ID is ${old_replikanto_id}.`;
+                if (restart_msg !== undefined) {
+                    msg = msg + "\n" + restart_msg;
+                }
             } else {
                 if (old_backup == undefined) {
                     old_backup = [new_bkp];
@@ -904,7 +904,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                 await db.put({
                     TableName: MachineIDTableName,
                     Item: { 
-                        machine_id: signed_machine_id.AssignedMachineId, 
+                        machine_id: machine_id_to_check, 
                         credits: old_credits, 
                         last_update: new Date().getTime(), 
                         replikanto_id: old_replikanto_id, 
@@ -912,36 +912,28 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                         bkp: old_backup
                     }
                 }).promise();
-                // Apagar o old que não serve para mais nada
-                await db.delete({
-                    TableName: MachineIDTableName,
-                    Key: {
-                        machine_id : machined_id_to_find
-                    }
-                }).promise();
+                
 
-                msg = `Changing to a new Machine ID was successful. Replikanto ID ${old_replikanto_id} was kept`;
+                msg = `Machine ID change was successful.\nYour Replikanto ID is ${old_replikanto_id}.`;
             }
+            // Apagar o old que não serve para mais nada
+            await db.delete({
+                TableName: MachineIDTableName,
+                Key: {
+                    machine_id : old_machine_id_to_check
+                }
+            }).promise();
         } else {
             status = "error";
-            msg = `Machine id ${machined_id_to_find} not found in ${MachineIDTableName}`;
+            msg = `Machine ID ${old_machine_id_to_check} not found in Replikanto database`;
         }
 
-        try {
-            // Find the broadcast list follower/owner old machine ID and then change it.
-            if (await BroadcastChangeMachineIDInfo(db, machined_id_to_find, signed_machine_id.AssignedMachineId, true)) {
-                msg = msg + "\n" + "Added follower " + signed_machine_id.AssignedMachineId + " to the broadcast list";
-            }
-        } catch (error) {
-            console.error("" + error);
-        }
-        
         return {
             action: "change_machine_id",
             payload: {
                 status: status,
-                machine_id: machined_id_to_find,
-                new_machine_id: signed_machine_id.AssignedMachineId,
+                machine_id: old_machine_id_to_check,
+                new_machine_id: machine_id_to_check,
                 msg
             }
         };
@@ -1149,7 +1141,7 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
             action: "credit",
             payload: {
                 status: "error",
-                msg: `Invalid credit`
+                msg: "Invalid credit"
             }
         };
     }
@@ -1242,7 +1234,7 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
     }).promise();
     
     for (let i = 0; i < dataConnection.Count; i++) {
-        let ret_to_send = await sendToConnection(requestContext, dataConnection.Items[i].connection_id, dataConnection.Items[i].region, {
+        const response = await sendToConnection(requestContext, dataConnection.Items[i].connection_id, dataConnection.Items[i].region, {
             action: "credit",
             payload: {
                 status: "credited",
@@ -1251,8 +1243,8 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
                 credit
             }
         });
-        if (ret_to_send.status !== 200) {
-            console.warn(ret_to_send);
+        if (response.status !== 200) {
+            console.warn(response);
         }
     }
 
@@ -1286,7 +1278,7 @@ functions.broadcast_follower_link = async function(headers, paths, requestContex
             action: "broadcast_follower_link",
             payload: {
                 status: "error",
-                msg: error
+                msg: "" + error
             }
         };
     }
@@ -1311,7 +1303,7 @@ functions.broadcast_follower_unlink = async function(headers, paths, requestCont
             action: "broadcast_follower_unlink",
             payload: {
                 status: "error",
-                msg: error
+                msg: "" + error
             }
         };
     }
@@ -1458,7 +1450,7 @@ exports.handler = async (event, context) => {
             "body": JSON.stringify({
                 payload: {
                     status: "error",
-                    msg: error
+                    msg: "" + error
                 }
             }),
             "isBase64Encoded": false
