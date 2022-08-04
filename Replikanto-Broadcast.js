@@ -85,12 +85,18 @@ exports.handler = async (event) => {
                 region: connection_obj.region,
                 status: status_code
             };
-            if (status_code !== 200) {
-                console.error(ret);
-                reject(ret);
-            } else {
+            if (status_code === 200) {
                 console.log(ret);
                 resolve(ret);
+            } else if (status_code === 410) { // GoneException
+                console.error(ret);
+                const broadcast_list_id = event.broadcast_list_id;
+                console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
+                await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
+                resolve(ret);
+            } else {
+                console.error(ret);
+                reject(ret);
             }
         });
         promisses.push(promise);
@@ -99,13 +105,7 @@ exports.handler = async (event) => {
     try {
         await Promise.all(promisses);
     } catch (e) {
-        if (e.status === 410) { // GoneException
-            const broadcast_list_id = event.broadcast_list_id;
-            console.info("Removing", e.connection_id, "follower from list", broadcast_list_id);
-            await RemoveConnectionBroadcastList(broadcast_list_id, e.connection_id, e.region);
-        } else {
-            console.error("Undefined Error", e);
-        }
+        console.error("Undefined Error", e);
     }
 
     const response = {
