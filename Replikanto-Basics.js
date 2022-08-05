@@ -603,17 +603,16 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
     //console.log(headers);
     //console.log(body);
 
-    const product_name              = headers["Product-Name"];
-    const replikanto_version        = headers["Replikanto-Version"];
+    const replikanto_version        = body.replikanto_version;
     let machine_id                  = undefined;
     try {
-        const signed_machine_id_obj = CleanSignedMachineID(headers["Machine-Id"]);
+        const signed_machine_id_obj = CleanSignedMachineID(body.machine_id);
         machine_id                  = signed_machine_id_obj.AssignedMachineId;
         //if (await UpdateDataBase(db, assigned_machine_id)) {
             //console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
         //}
     } catch (error) {
-        console.warn(`Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`);
+        console.warn(`Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}`);
         //const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
         //if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
             return {

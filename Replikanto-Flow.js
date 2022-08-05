@@ -94,12 +94,15 @@ function cleanAssignedMachineID(machine_id) {
     };
 }
 
-async function sendToConnection(requestContext, connection_id, local_region, data) { // parece que é mais lento do que a função antiga
+async function sendToConnection(requestContext, connection_id, local_region, data, useUnsec = fasle) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
     if (local_region === undefined) {
         local_region = region;
     }
-    const wsApiId = process.env["WS_API_ID_" + local_region.toUpperCase().replace(/-/g, "_")];
+    let wsApiId = process.env["WS_API_ID_" + local_region.toUpperCase().replace(/-/g, "_")];
+    if (useUnsec) {
+        wsApiId = process.env.WS_UNSEC_API_ID_US_EAST_1;
+    }
     let stage = requestContext.stage;
     if (stage === "test-invoke-stage") {
         stage = "dev";
@@ -482,7 +485,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                             action: "trade",
                             payload: trade,
                             replikanto_version
-                        });
+                        }, node === ECHO_ID);
                         //console.log(response);
                         //console.log(`sendToConnection = ${response.status}`);
                         //console.log(url + "/" + connection_id, response.status);
@@ -619,7 +622,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 action: "trade",
                                 payload: trade,
                                 replikanto_version
-                            });
+                            }, node === ECHO_ID);
                             if (response.status === 200) {
                                 nodes_status.push({
                                     node,
