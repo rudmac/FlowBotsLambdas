@@ -474,50 +474,45 @@ async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credi
 var functions = [];
 
 functions.connect = async function(headers, paths, requestContext, body, db, isProd) {
-    const connection_id         = requestContext.connectionId;
-    const connectedAt           = requestContext.connectedAt;
-    const replikanto_version    = headers["Replikanto-Version"];
-    const product_name          = headers["Product-Name"];
-    let isAssignedMachineId     = false;
-    let machine_id              = undefined;
-    let unsigned_machine_id     = undefined;
+    const connection_id             = requestContext.connectionId;
+    const connectedAt               = requestContext.connectedAt;
+    const replikanto_version        = headers["Replikanto-Version"];
+    const product_name              = headers["Product-Name"];
+    //let unsigned_machine_id         = undefined;
+    let machine_id                  = undefined;
     try {
-        const signed_machine_id = CleanSignedMachineID(headers["Machine-Id"]);
-        machine_id              = signed_machine_id.AssignedMachineId;
-        unsigned_machine_id     = signed_machine_id.MachineId;
-        isAssignedMachineId     = true;
+        const signed_machine_id_obj = CleanSignedMachineID(headers["Machine-Id"]);
+        machine_id                  = signed_machine_id_obj.AssignedMachineId;
     } catch (error) {
+        console.warn(`Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`);
+        /*
         try {
-            machine_id          = CleanMachineID(headers["Machine-Id"]);
-            unsigned_machine_id = machine_id;
+            unsigned_machine_id     = CleanMachineID(headers["Machine-Id"]);
+            machine_id              = unsigned_machine_id;
         } catch (error) {
-            console.error(error);
+            console.error("" + error);
             return false;
         }
+        */
+        return false;
     }
-    
+
     if (MachineIDsBlackList.includes(machine_id)) { // Tem tbm um trecho verificando o blacklist no Flow
+        console.warn(`Machine ID ${machine_id} is in the Black List`);
         return false;
     }
     
-    let license_type            = undefined;
+    let license_type                = undefined;
     try {
         license_type = await LicenseType(machine_id, product_name, isProd);
-        console.log(`License Type ${license_type} for machine id ${machine_id} with version ${replikanto_version}`);
-        
-        if (license_type === "Regular" && 
-            replikanto_version !== undefined && 
-            compareVersion(replikanto_version, 1, 4, 1) >= 0 && // versão nova
-            !isAssignedMachineId) {
-
-            console.log(`Unassigned machine id ${machine_id} found for Regular Replikanto (${replikanto_version}) License`);
-            return false;
-        }
+        console.log(`License Type ${license_type} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}`);
     } catch (error) {
         console.error("" + error);
     }
-    
+
+
     let replikanto_id = "CONTACT-SUPPORT";
+
     const data = await MachineIdRelation(db, machine_id, "replikanto_id");
     if (data === false) {
         let old_machine_id      = undefined;
@@ -527,10 +522,10 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
             //const old_data = await MachineIdRelation(db, old_machine_id, "replikanto_id, credits, last_update, unassigned_machine_id, bkp");
             //if (old_data === false) {
                 // Aqui então podemos criar um novo Rep Id pois não tem old machine id
-                replikanto_id = await newReplikantoID(machine_id, process.env.INITIAL_CREDITS, db, connectedAt);
+                //replikanto_id = await newReplikantoID(machine_id, process.env.INITIAL_CREDITS, db, connectedAt);
             //} else {
                 // Find the broadcast list follower/owner old machine ID and then change it.
-                await BroadcastChangeMachineIDInfo(db, old_machine_id, machine_id, false);
+                //await BroadcastChangeMachineIDInfo(db, old_machine_id, machine_id, false);
                 /* Não vamos fazer a mudança e sim informar para que o usuário faça a mudança do machine id dele...
                 const old_replikanto_id         = old_data.Items[0].replikanto_id;
                 const old_credits               = old_data.Items[0].credits;
@@ -557,12 +552,13 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
             //}
         } else {
             // Aqui então podemos criar um novo Rep Id pois não tem old machine id
-            replikanto_id = await newReplikantoID(machine_id, process.env.INITIAL_CREDITS, db, connectedAt);
+            //replikanto_id = await newReplikantoID(machine_id, process.env.INITIAL_CREDITS, db, connectedAt);
         }
+        replikanto_id = await newReplikantoID(machine_id, process.env.INITIAL_CREDITS, db, connectedAt);
     } else {
         replikanto_id = data.Items[0].replikanto_id;
     }
-    
+
     await db
         .put({
             TableName: ConnectionTableName,
@@ -578,7 +574,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         })
         .promise();
     
-    console.log(`Connected connection id ${connection_id}, machine id ${machine_id}, Replikanto version ${replikanto_version}, and region ${region}`);
+    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version} and region ${region}`);
 
     // TODO se tiver algum trade pendente para receber, que seja agora... Será que dá?
     
@@ -606,23 +602,20 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
     //const connection_id = requestContext.connectionId;
     //console.log(headers);
     //console.log(body);
-    let machine_id;
-    let assigned_machine_id;
-    //let unsigned_machine_id;
+
+    const product_name              = headers["Product-Name"];
+    const replikanto_version        = headers["Replikanto-Version"];
+    let machine_id                  = undefined;
     try {
-        assigned_machine_id = CleanSignedMachineID(body.machine_id);
-        if (await UpdateDataBase(db, assigned_machine_id)) {
-            console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
-        }
-        machine_id = assigned_machine_id.AssignedMachineId;
-        //unsigned_machine_id = assigned_machine_id.MachineId;
+        const signed_machine_id_obj = CleanSignedMachineID(headers["Machine-Id"]);
+        machine_id                  = signed_machine_id_obj.AssignedMachineId;
+        //if (await UpdateDataBase(db, assigned_machine_id)) {
+            //console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
+        //}
     } catch (error) {
-        machine_id = CleanMachineID(body.machine_id);
-        //unsigned_machine_id = machine_id;
-        // Verificar se não fez um downgrade de versão e voltou a ter um machine ID unassigned
-        const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
-        if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
-            console.log(`Machine id ${machine_id} has ${assigned_machine_id_data.Count} assigned reference(s) already in use. AMBIGUOUS`);
+        console.warn(`Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`);
+        //const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
+        //if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
             return {
                 action: "node_info",
                 payload: {
@@ -630,15 +623,10 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
                     credits: 0
                 }
             };
-        }
+        //}
     }
+
     //const replikanto_version = body.replikanto_version;
-    
-    //console.log("machine_id", machine_id);
-    if (machine_id === undefined) {
-        return false;
-    }
-    
     const data = await MachineIdRelation(db, machine_id, "replikanto_id, credits");
     
     let credits = 0;
@@ -652,11 +640,11 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
             //const old_data = await MachineIdRelation(db, old_machine_id, "replikanto_id, credits, last_update, unassigned_machine_id, bkp");
             //if (old_data === false) {
                 // Aqui então podemos criar um novo Rep Id pois não tem old machine id
-                credits = process.env.INITIAL_CREDITS;
-                replikanto_id = await newReplikantoID(machine_id, credits, db, new Date());
+                //credits = process.env.INITIAL_CREDITS;
+                //replikanto_id = await newReplikantoID(machine_id, credits, db, new Date());
             //} else {
                 // Find the broadcast list follower/owner old machine ID and then change it.
-                await BroadcastChangeMachineIDInfo(db, old_machine_id, machine_id, false);
+                //await BroadcastChangeMachineIDInfo(db, old_machine_id, machine_id, false);
                 /* 
                 const old_replikanto_id         = old_data.Items[0].replikanto_id;
                 const old_credits               = old_data.Items[0].credits;
@@ -683,9 +671,11 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
                 */
             //}
         } else {
-            credits = process.env.INITIAL_CREDITS;
-            replikanto_id = await newReplikantoID(machine_id, credits, db, new Date());
-        }    
+            //credits = process.env.INITIAL_CREDITS;
+            //replikanto_id = await newReplikantoID(machine_id, credits, db, new Date());
+        }
+        credits = process.env.INITIAL_CREDITS;
+        replikanto_id = await newReplikantoID(machine_id, credits, db, new Date());
     } else {
         credits = data.Items[0].credits;
         replikanto_id = data.Items[0].replikanto_id;
