@@ -94,22 +94,22 @@ function cleanAssignedMachineID(machine_id) {
     };
 }
 
-async function sendToConnection(requestContext, connection_id, region, data) { // parece que é mais lento do que a função antiga
+async function sendToConnection(requestContext, connection_id, local_region, data) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
-    const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
-    if (region === undefined) {
-        region = "us-east-1";
+    if (local_region === undefined) {
+        local_region = region;
     }
+    const wsApiId = process.env["WS_API_ID_" + local_region.toUpperCase().replace(/-/g, "_")];
     let stage = requestContext.stage;
     if (stage === "test-invoke-stage") {
         stage = "dev";
     }
-    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
+    let endpoint = `https://${wsApiId}.execute-api.${local_region}.amazonaws.com/${stage}`;
 
     const callbackAPI = new ApiGatewayManagementApi({
         apiVersion: '2018-11-29',
         endpoint: endpoint,
-        region
+        region: local_region
     });
 
     try {
