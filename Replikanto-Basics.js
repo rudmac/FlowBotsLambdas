@@ -5,6 +5,7 @@ var crypto = require('crypto');
 
 const DynamoDB = require('aws-sdk/clients/dynamodb');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
+const SNS = require('aws-sdk/clients/sns');
 const region = process.env.AWS_REGION;
 
 const dynamoDbConfig = new DynamoDB({
@@ -30,6 +31,9 @@ const MachineIDsBlackList = process.env.MACHINE_IDS_BLACK_LIST.split(',');
 const VendorName = process.env.VENDOR_NAME;
 const VendorPassword = process.env.VENDOR_PWD;
 const ActiveNotifyInterval = process.env.ACTIVE_NOTIFY_INTERVAL;
+const TopicAdmMsg = process.env.TOPIC_ADMIN_MESSAGES;
+const TopicAdmChatID = process.env.TOPIC_ADMIN_CHAT_ID;
+const TopicAdmToken = process.env.TOPIC_ADMIN_TOKEN;
 
 const re_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60}|)/;
 const re_signed_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60})/;
@@ -170,6 +174,7 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
+        SNSPublish("Error", `${connection_id}, ${e.code}, ${e.statusCode}`);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -471,6 +476,22 @@ async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credi
     }).promise();
 }
 
+function SNSPublish(subject, msg) {
+    const msg_obj = {
+        msg,
+        chat_id: TopicAdmChatID,
+        token: TopicAdmToken
+    };
+    new SNS().publish({
+        Subject: subject,
+        Message: JSON.stringify(msg_obj),
+        TopicArn: TopicAdmMsg,
+    }, function(err, data) {
+        if (err) console.log(err, err.stack); 
+        else console.log(data);
+    });
+}
+
 var functions = [];
 
 functions.connect = async function(headers, paths, requestContext, body, db, isProd) {
@@ -480,11 +501,14 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
     const product_name              = headers["Product-Name"];
     //let unsigned_machine_id         = undefined;
     let machine_id                  = undefined;
+    
     try {
         const signed_machine_id_obj = CleanSignedMachineID(headers["Machine-Id"]);
         machine_id                  = signed_machine_id_obj.AssignedMachineId;
     } catch (error) {
-        console.warn(`Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`);
+        const msgInfo = `Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`
+        console.warn(msgInfo);
+        SNSPublish("Warn", msgInfo);
         /*
         try {
             unsigned_machine_id     = CleanMachineID(headers["Machine-Id"]);
@@ -494,11 +518,13 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
             return false;
         }
         */
-        return false;
+        return true;
     }
 
     if (MachineIDsBlackList.includes(machine_id)) { // Tem tbm um trecho verificando o blacklist no Flow
-        console.warn(`Machine ID ${machine_id} is in the Black List`);
+        const msgInfo = `Machine ID ${machine_id} is in the Black List`;
+        console.warn(msgInfo);
+        SNSPublish("Warn", msgInfo);
         return false;
     }
     
@@ -508,6 +534,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         console.log(`License Type ${license_type} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}`);
     } catch (error) {
         console.error("" + error);
+        SNSPublish("Error", `${error}`);
     }
 
 
@@ -612,7 +639,9 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
             //console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
         //}
     } catch (error) {
-        console.warn(`Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}`);
+        const msgInfo = `Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}`;
+        console.warn(msgInfo);
+        SNSPublish("Warn", msgInfo);
         //const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
         //if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
             return {
@@ -756,6 +785,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
         }
     } catch (error) {
         console.error("" + error);
+        SNSPublish("Error", `${error}`);
     }
 
     try {
@@ -833,7 +863,9 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                     const connection_id = data_new_machine_id_connected.Items[0].connection_id;
                     const region = data_new_machine_id_connected.Items[0].region;
 
-                    console.warn(`The new machine id ${machine_id_to_check} is connected without changing the machine id, so the newly created Replikanto ID ${actual_replikanto_id} will be replaced by the old good one ${old_replikanto_id} in both tables`);
+                    const msgInfo = `The new machine id ${machine_id_to_check} is connected without changing the machine id, so the newly created Replikanto ID ${actual_replikanto_id} will be replaced by the old good one ${old_replikanto_id} in both tables`;
+                    console.warn(msgInfo);
+                    SNSPublish("Warn", msgInfo);
 
                     await db.update({
                         TableName: ConnectionTableName,
@@ -856,6 +888,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                         });
                     } catch (e) {
                         console.error(e);
+                        SNSPublish("Error", `${e}`);
                         restart_msg = "Please restart Ninjatrader";
                     }
                 }
@@ -928,6 +961,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
         };
     } catch (error) {
         console.error(error);
+        SNSPublish("Error", `${error}`);
         return {
             action: "change_machine_id",
             payload: {
@@ -1263,6 +1297,7 @@ functions.broadcast_follower_link = async function(headers, paths, requestContex
         };
     } catch (error) {
         console.error("" + error);
+        SNSPublish("Error", `${error}`);
         return {
             action: "broadcast_follower_link",
             payload: {
@@ -1288,6 +1323,7 @@ functions.broadcast_follower_unlink = async function(headers, paths, requestCont
         };
     } catch (error) {
         console.error("" + error);
+        SNSPublish("Error", `${error}`);
         return {
             action: "broadcast_follower_unlink",
             payload: {

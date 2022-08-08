@@ -3,6 +3,7 @@
 const DynamoDB = require('aws-sdk/clients/dynamodb');
 const Lambda = require('aws-sdk/clients/lambda');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
+const SNS = require('aws-sdk/clients/sns');
 
 const region = process.env.AWS_REGION;
 
@@ -34,6 +35,9 @@ const ECHO_ID = "@REP-TEST-ECHO";
 const OrderStatesToCheck = ["Submitted"/*, "ChangeSubmitted", "CancelSubmitted"*/];
 const MachineIDsBlackList = process.env.MACHINE_IDS_BLACK_LIST.split(',');
 const BroadcastChuncks = process.env.BROADCAST_CHUNKS;
+const TopicAdmMsg = process.env.TOPIC_ADMIN_MESSAGES;
+const TopicAdmChatID = process.env.TOPIC_ADMIN_CHAT_ID;
+const TopicAdmToken = process.env.TOPIC_ADMIN_TOKEN;
 
 const re_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60}|)/;
 const re_assigned_machine_id = /[0-9A-Fa-f]{32}(-[A-Za-z0-9]{1,60})/;
@@ -94,7 +98,7 @@ function cleanAssignedMachineID(machine_id) {
     };
 }
 
-async function sendToConnection(requestContext, connection_id, local_region, data, useUnsec = fasle) { // parece que é mais lento do que a função antiga
+async function sendToConnection(requestContext, connection_id, local_region, data, useUnsec = false) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
     if (local_region === undefined) {
         local_region = region;
@@ -122,6 +126,7 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
+        SNSPublish("Error", `${connection_id}, ${e.code}, ${e.statusCode}`);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -202,7 +207,7 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_i
         const data = await db.query({
             TableName: BroadcastTableName,
             KeyConditionExpression: "broadcast_list_id = :val1",
-            ProjectionExpression: "connection_ids, broadcast_id",
+            ProjectionExpression: "connection_ids, broadcast_id, broadcast_name, telegram_chat_id",
             FilterExpression: "contains (owner_machine_ids, :val2)",
             ExpressionAttributeValues: {
                 ":val1": broadcast_list_id,
@@ -218,10 +223,13 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_i
 
         return {
             broadcast_id: data.Items[0]["broadcast_id"],
-            connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : [])
+            connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : []),
+            broadcast_name: data.Items[0]["broadcast_name"],
+            telegram_chat_id: data.Items[0]["telegram_chat_id"]
         };
     } catch (error) {
         console.error(error);
+        SNSPublish("Error", `${error}`);
         return undefined;
     }
 }
@@ -229,6 +237,22 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_i
 function arrayRemove(arr, value) { 
     return arr.filter(function(ele){ 
         return ele != value; 
+    });
+}
+
+function SNSPublish(subject, msg, telegram_chat_id = undefined) {
+    const msg_obj = {
+        msg,
+        chat_id: telegram_chat_id != undefined ? telegram_chat_id : TopicAdmChatID,
+        token: TopicAdmToken
+    };
+    new SNS().publish({
+        Subject: subject,
+        Message: JSON.stringify(msg_obj),
+        TopicArn: TopicAdmMsg,
+    }, function(err, data) {
+        if (err) console.log(err, err.stack); 
+        else console.log(data);
     });
 }
 
@@ -338,6 +362,8 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             }
             const connections = followersConnections.connection_ids;
             const broadcast_id = followersConnections.broadcast_id;
+            const broadcast_name = followersConnections.broadcast_name;
+            const telegram_chat_id = followersConnections.telegram_chat_id;
 
             broacast_connections_count += connections.length;
 
@@ -361,6 +387,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                     })
                 }).promise());
             }
+            SNSPublish("Broadcast", `${broadcast_name} => [Order State: ${trade.orderState}, action: ${trade.orderAction}, instrument: ${trade.instrument}, quantity: ${trade.quantity}, type: ${trade.orderType}, limit price: ${trade.limitPrice} and stop price: ${trade.stopPrice}]`, telegram_chat_id);
         }));
 
 
