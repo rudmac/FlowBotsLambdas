@@ -387,14 +387,21 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                     })
                 }).promise());
             }
-            SNSPublish("Broadcast", `${broadcast_name} => [Order State: ${trade.orderState}, action: ${trade.orderAction}, instrument: ${trade.instrument}, quantity: ${trade.quantity}, type: ${trade.orderType}, limit price: ${trade.limitPrice} and stop price: ${trade.stopPrice}]`, telegram_chat_id);
+            
+            try {
+                if (telegram_chat_id != undefined) {
+                    const tradeName = trade.name ? "\nName: " + trade.name : "";
+                    SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
+                }
+            } catch (error) {
+                console.error("" + error);
+            }
         }));
-
 
         let broadcast_status = "not broadcast";
         if (broadcast_promisses.length > 0) {
             console.log(`${FunctionName} broadcasting...`);
-            await Promise.all(broadcast_promisses);   
+            await Promise.all(broadcast_promisses); 
             console.log(`${FunctionName} broadcast`);
             broadcast_status = "broadcast";
         }
@@ -415,7 +422,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 let nodesToCalc = nodes.filter(item => item !== ECHO_ID);
                 let debitedCredit = nodesToCalc.length;
                 if (broadcast_list.length > 0) {
-                    debitedCredit += broacast_connections_count
+                    debitedCredit += broacast_connections_count;
                 }
                 //console.log(debitedCredit);
                 //console.log('onorderupdate db.update 1');

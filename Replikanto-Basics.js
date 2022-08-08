@@ -1017,7 +1017,9 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
                 }
             }).promise();
         if (data.Count > 0) {
-            console.log(`Unable to activate machine id ${machine_id}. There are ${data.Count} instance(s) already opened.`);
+            const msgInfo = `Unable to activate machine id ${machine_id}. There are ${data.Count} instance(s) already opened.`;
+            console.warn(msgInfo);
+            SNSPublish("Warn", msgInfo);
             
             if (is_assigned_machine_id) { // target only assigned machine ids
                 status = "invalid";
@@ -1054,8 +1056,9 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
                 .promise();
         }
     } catch (error) {
-        console.log("Unable to update the active machine id table");
-        console.log("Error", error);
+        console.error("Unable to update the active machine id table");
+        console.error("Error", "" + error);
+        SNSPublish("Error", "" + error);
     }
 
     const nakedStr = machine_id + ":" + seed + ":" + status + ":" + interval;
@@ -1146,8 +1149,9 @@ functions.disabled_machine_id = async function(headers, paths, requestContext, b
         }
 
     } catch (error) {
-        console.log("Unable to delete the active machine id table");
-        console.log("Error", error);
+        console.error("Unable to delete the active machine id table");
+        console.error("Error", "" + error);
+        SNSPublish("Error", "" + error);
     }
 
     return {
@@ -1336,7 +1340,7 @@ functions.broadcast_follower_unlink = async function(headers, paths, requestCont
 
 functions.broadcast = async function(headers, paths, requestContext, body, db, isProd) {
     const broadcast_list_id = decodeURIComponent(paths['broadcast_list_id']);
-    console.log(broadcast_list_id);
+    //console.log(broadcast_list_id);
 
     var params = {
         TableName: BroadcastTableName,
