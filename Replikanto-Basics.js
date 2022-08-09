@@ -529,6 +529,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
     }
     
     let license_type                = undefined;
+    /*
     try {
         license_type = await LicenseType(machine_id, product_name, isProd);
         console.log(`License Type ${license_type} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}`);
@@ -536,7 +537,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         console.error("" + error);
         SNSPublish("Error", `${error}`);
     }
-
+    */
 
     let replikanto_id = "CONTACT-SUPPORT";
 
@@ -595,7 +596,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
                 connection_id,
                 createdDate: connectedAt,
                 replikanto_version,
-                license_type,
+                //license_type,
                 region
             }
         })
@@ -1344,7 +1345,7 @@ functions.broadcast = async function(headers, paths, requestContext, body, db, i
 
     var params = {
         TableName: BroadcastTableName,
-        ProjectionExpression: "followers_machine_ids",
+        ProjectionExpression: "followers_machine_ids, owner_machine_ids, broadcast_name, telegram_chat_id",
         KeyConditionExpression: "broadcast_list_id = :val",
         ExpressionAttributeValues: {
             ":val": broadcast_list_id
@@ -1353,17 +1354,24 @@ functions.broadcast = async function(headers, paths, requestContext, body, db, i
         
     let data = await db.query(params).promise();
     
-    let followers = [];
-    
+    let followers = [], owners = [];
+    let broadcast_name, telegram_chat_id;
+
     if (data.Count > 0) {
         followers = data.Items[0].followers_machine_ids;
+        owners = data.Items[0].owner_machine_ids;
+        broadcast_name = data.Items[0].broadcast_name;
+        telegram_chat_id = data.Items[0].telegram_chat_id;
     }
 
     return {
         action: "broacast",
         payload: {
+            broadcast_name,
+            telegram_chat_id,
             status: "list",
-            followers
+            followers,
+            owners
         }
     };
 };
