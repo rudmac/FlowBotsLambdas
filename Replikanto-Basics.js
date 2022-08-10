@@ -174,7 +174,7 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
-        SNSPublish("Error", `${connection_id}, ${e.code}, ${e.statusCode}`);
+        await SNSPublish("Send to Connetion", `${connection_id}, ${e.code}, ${e.statusCode}`);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -476,20 +476,16 @@ async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credi
     }).promise();
 }
 
-function SNSPublish(subject, msg) {
-    const msg_obj = {
-        msg,
-        chat_id: TopicAdmChatID,
-        token: TopicAdmToken
-    };
-    new SNS().publish({
+async function SNSPublish(subject, msg) {
+    await new SNS().publish({
         Subject: subject,
-        Message: JSON.stringify(msg_obj),
+        Message: JSON.stringify({
+            msg,
+            chat_id: TopicAdmChatID,
+            token: TopicAdmToken
+        }),
         TopicArn: TopicAdmMsg,
-    }, function(err, data) {
-        if (err) console.log(err, err.stack); 
-        else console.log(data);
-    });
+    }).promise();
 }
 
 var functions = [];
@@ -506,9 +502,9 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         const signed_machine_id_obj = CleanSignedMachineID(headers["Machine-Id"]);
         machine_id                  = signed_machine_id_obj.AssignedMachineId;
     } catch (error) {
-        const msgInfo = `Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`
+        const msgInfo = `Unsigned Machine ID ${headers["Machine-Id"]} for product ${product_name} version ${replikanto_version}`;
         console.warn(msgInfo);
-        SNSPublish("Warn", msgInfo);
+        await SNSPublish("Connect", msgInfo);
         /*
         try {
             unsigned_machine_id     = CleanMachineID(headers["Machine-Id"]);
@@ -524,7 +520,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
     if (MachineIDsBlackList.includes(machine_id)) { // Tem tbm um trecho verificando o blacklist no Flow
         const msgInfo = `Machine ID ${machine_id} is in the Black List`;
         console.warn(msgInfo);
-        SNSPublish("Warn", msgInfo);
+        await SNSPublish("Connect", msgInfo);
         return false;
     }
     
@@ -535,7 +531,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         console.log(`License Type ${license_type} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}`);
     } catch (error) {
         console.error("" + error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("Connect", `${error}`);
     }
     */
 
@@ -640,9 +636,9 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
             //console.log(`Updated machine id ${assigned_machine_id.MachineId} to ${assigned_machine_id.AssignedMachineId}`);
         //}
     } catch (error) {
-        const msgInfo = `Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}`;
+        const msgInfo = `Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}, Replikanto ID = CONTACT-SUPPORT`;
         console.warn(msgInfo);
-        SNSPublish("Warn", msgInfo);
+        await SNSPublish("Node Info", msgInfo);
         //const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
         //if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
             return {
@@ -783,10 +779,12 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
         if (await BroadcastChangeMachineIDInfo(db, old_machine_id_to_check, machine_id_to_check, true)) {
             console.info("Added " + machine_id_to_check + " to the broadcast list");
             console.info("Removed " + old_machine_id_to_check + " to the broadcast list");
+            await SNSPublish("Change Machine ID", "Added " + machine_id_to_check + " to the broadcast list");
+            await SNSPublish("Change Machine ID", "Removed " + old_machine_id_to_check + " to the broadcast list");
         }
     } catch (error) {
         console.error("" + error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("Change Machine ID", `${error}`);
     }
 
     try {
@@ -866,7 +864,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
 
                     const msgInfo = `The new machine id ${machine_id_to_check} is connected without changing the machine id, so the newly created Replikanto ID ${actual_replikanto_id} will be replaced by the old good one ${old_replikanto_id} in both tables`;
                     console.warn(msgInfo);
-                    SNSPublish("Warn", msgInfo);
+                    await SNSPublish("Change Machine ID", msgInfo);
 
                     await db.update({
                         TableName: ConnectionTableName,
@@ -889,7 +887,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
                         });
                     } catch (e) {
                         console.error(e);
-                        SNSPublish("Error", `${e}`);
+                        await SNSPublish("Change Machine ID", `${e}`);
                         restart_msg = "Please restart Ninjatrader";
                     }
                 }
@@ -951,6 +949,8 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
             msg = `Machine ID ${old_machine_id_to_check} not found in Replikanto database`;
         }
 
+        await SNSPublish("Change Machine ID", msg);
+
         return {
             action: "change_machine_id",
             payload: {
@@ -962,7 +962,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
         };
     } catch (error) {
         console.error(error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("Change Machine ID", `${error}`);
         return {
             action: "change_machine_id",
             payload: {
@@ -1020,7 +1020,7 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
         if (data.Count > 0) {
             const msgInfo = `Unable to activate machine id ${machine_id}. There are ${data.Count} instance(s) already opened.`;
             console.warn(msgInfo);
-            SNSPublish("Warn", msgInfo);
+            await SNSPublish("Active Machine ID", msgInfo);
             
             if (is_assigned_machine_id) { // target only assigned machine ids
                 status = "invalid";
@@ -1059,7 +1059,7 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
     } catch (error) {
         console.error("Unable to update the active machine id table");
         console.error("Error", "" + error);
-        SNSPublish("Error", "" + error);
+        await SNSPublish("Active Machine ID", "" + error);
     }
 
     const nakedStr = machine_id + ":" + seed + ":" + status + ":" + interval;
@@ -1152,7 +1152,7 @@ functions.disabled_machine_id = async function(headers, paths, requestContext, b
     } catch (error) {
         console.error("Unable to delete the active machine id table");
         console.error("Error", "" + error);
-        SNSPublish("Error", "" + error);
+        await SNSPublish("Disable Machine ID", "" + error);
     }
 
     return {
@@ -1275,6 +1275,8 @@ functions.credit = async function(headers, paths, requestContext, body, db, isPr
             console.warn(response);
         }
     }
+    
+    await SNSPublish("Credit", `Credited ${credit} on Replikanto ID ${replikanto_id} total ${ret.Attributes.credits} using order ${orderId}`);
 
     return {
         action: "credit",
@@ -1302,7 +1304,7 @@ functions.broadcast_follower_link = async function(headers, paths, requestContex
         };
     } catch (error) {
         console.error("" + error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("Broadcast Follower Link", `${error}`);
         return {
             action: "broadcast_follower_link",
             payload: {
@@ -1328,7 +1330,7 @@ functions.broadcast_follower_unlink = async function(headers, paths, requestCont
         };
     } catch (error) {
         console.error("" + error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("Broadcast Follower Unlink", `${error}`);
         return {
             action: "broadcast_follower_unlink",
             payload: {

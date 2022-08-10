@@ -126,7 +126,7 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
-        SNSPublish("Error", `${connection_id}, ${e.code}, ${e.statusCode}`);
+        await SNSPublish("Send to Connection", `${connection_id}, ${e.code}, ${e.statusCode}`);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -229,7 +229,7 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id, machine_i
         };
     } catch (error) {
         console.error(error);
-        SNSPublish("Error", `${error}`);
+        await SNSPublish("FollowersConnectionBroadcastList", `${error}`);
         return undefined;
     }
 }
@@ -240,20 +240,16 @@ function arrayRemove(arr, value) {
     });
 }
 
-function SNSPublish(subject, msg, telegram_chat_id = undefined) {
-    const msg_obj = {
-        msg,
-        chat_id: telegram_chat_id != undefined ? telegram_chat_id : TopicAdmChatID,
-        token: TopicAdmToken
-    };
-    new SNS().publish({
+async function SNSPublish(subject, msg, telegram_chat_id = undefined) {
+    await new SNS().publish({
         Subject: subject,
-        Message: JSON.stringify(msg_obj),
+        Message: JSON.stringify({
+            msg,
+            chat_id: telegram_chat_id != undefined ? telegram_chat_id : TopicAdmChatID,
+            token: TopicAdmToken
+        }),
         TopicArn: TopicAdmMsg,
-    }, function(err, data) {
-        if (err) console.log(err, err.stack); 
-        else console.log(data);
-    });
+    }).promise();
 }
 
 var functions = [];
@@ -389,9 +385,12 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             }
             
             try {
-                if (telegram_chat_id != undefined) {
-                    const tradeName = trade.name ? "\nName: " + trade.name : "";
-                    SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
+                const tradeName = trade.name ? "\nName: " + trade.name : "";
+                if (telegram_chat_id !== undefined) {
+                    await SNSPublish("Replikanto Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
+                }
+                if (telegram_chat_id === undefined || TopicAdmChatID != telegram_chat_id) {
+                    await SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`);
                 }
             } catch (error) {
                 console.error("" + error);
