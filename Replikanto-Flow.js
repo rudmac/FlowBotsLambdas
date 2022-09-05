@@ -258,7 +258,10 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     //console.log('OnOrderUpdate', body);
 
     const trade = body.trade;
+    console.log("trade", trade);
+
     let nodes   = [...new Set(body.nodes)].filter(function (e) { return e != null; });
+    console.log("nodes", nodes);
 
     if (nodes.length === 0) {
         return {
@@ -301,6 +304,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     
     const replikanto_version = body.replikanto_version;
     const replikanto_id = body.replikanto_id;
+    console.log("replikanto_id", replikanto_id);
     
     // BLACKLIST, aqui só quando for via HTTP, porque via WS já faz a verificação durante o connect.
     if (requestContext.hasOwnProperty("http_method")) {
@@ -338,6 +342,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     }
 
     const orderState = trade.orderState;
+    console.log("orderState", orderState);
 
     let credits = 0;
     let beforeCredit = 0;
@@ -386,11 +391,12 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             
             try {
                 const tradeName = trade.name ? "\nName: " + trade.name : "";
+                const stateName = (trade.orderState == "Filled" && trade.averageFillPrice != undefined) ? trade.orderState + "\nAverage Fill Price: " + trade.averageFillPrice : trade.orderState;
                 if (telegram_chat_id !== undefined) {
-                    await SNSPublish("Replikanto Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
+                    await SNSPublish("Replikanto Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${stateName}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
                 }
                 if (telegram_chat_id === undefined || TopicAdmChatID != telegram_chat_id) {
-                    await SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${trade.orderState}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`);
+                    await SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${stateName}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`);
                 }
             } catch (error) {
                 console.error("" + error);
@@ -420,9 +426,9 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             try {
                 let nodesToCalc = nodes.filter(item => item !== ECHO_ID);
                 let debitedCredit = nodesToCalc.length;
-                if (broadcast_list.length > 0) {
-                    debitedCredit += broacast_connections_count;
-                }
+                //if (broadcast_list.length > 0) {
+                    //debitedCredit += broacast_connections_count;
+                //}
                 //console.log(debitedCredit);
                 //console.log('onorderupdate db.update 1');
                 let updateRet = await db.update({
@@ -582,7 +588,8 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     }
 
     let responses = await Promise.all(promisses);
-    //console.log(`Responses = ${responses}`);
+    console.log("responses", responses);
+    
     for(let r of responses) {
         if (r.status === "sent" || r.status === "error") {
             nodes_status.push(r);
