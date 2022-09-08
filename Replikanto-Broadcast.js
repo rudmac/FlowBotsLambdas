@@ -94,6 +94,9 @@ exports.handler = async (event) => {
                 console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
                 await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
                 resolve(ret);
+            } else if (status_code === 429) { // LimitExceededException
+                console.error(ret);
+                reject(ret);
             } else {
                 console.error(ret);
                 reject(ret);

@@ -26,6 +26,7 @@ const ConnectionTableName = process.env.DYNAMODB_TABLE_CONNECTION;
 const MachineIDTableName = process.env.DYNAMODB_TABLE_MACHINE_ID;
 const ActiveMachineIDTableName = process.env.DYNAMODB_TABLE_ACTIVE_MACHINE_ID;
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
+const BroadcastPositionInfoTableName = process.env.DYNAMODB_TABLE_BROADCAST_POSITION_INFO;
 const MD5Key = process.env.MD5Key;
 const MachineIDsBlackList = process.env.MACHINE_IDS_BLACK_LIST.split(',');
 const VendorName = process.env.VENDOR_NAME;
@@ -373,7 +374,7 @@ async function BroadcastList(db, machine_id) {
         //console.log("BroadcastList", machine_id);
         const data = await db.scan({
             TableName: BroadcastTableName,
-            ProjectionExpression: "broadcast_id, broadcast_name",
+            ProjectionExpression: "broadcast_list_id, broadcast_id, broadcast_name",
             FilterExpression: "contains (followers_machine_ids, :val)",
             ExpressionAttributeValues: {
                 ":val": machine_id
@@ -385,6 +386,7 @@ async function BroadcastList(db, machine_id) {
         data.Items.forEach(function(element, index, array) {
             //console.log(element);
             list.push({
+                broadcast_list_id: element.broadcast_list_id,
                 id: element.broadcast_id,
                 name: element.broadcast_name
             });
@@ -392,7 +394,7 @@ async function BroadcastList(db, machine_id) {
 
         return list;
     } catch (error) {
-        console.log(error);
+        console.error(error);
         return [];
     }
 }
@@ -444,6 +446,73 @@ async function BroadcastChangeMachineIDInfo(db, old_machined_id, new_machine_id,
         }
     }
     return did;
+}
+
+async function BroadcastListIDFromOwner(db, broadcast_list_id, machine_id) {
+    try {
+        const data = await db.query({
+            TableName: BroadcastTableName,
+            KeyConditionExpression: "broadcast_list_id = :val1",
+            ProjectionExpression: "broadcast_list_id",
+            FilterExpression: "contains (owner_machine_ids, :val2)",
+            ExpressionAttributeValues: {
+                ":val1": broadcast_list_id,
+                ":val2": machine_id
+            },
+        }).promise();
+        
+        //console.log(data);
+        
+        if (data.Count == 0) {
+            return undefined;
+        }
+
+        return data.Items[0]["broadcast_list_id"];
+    } catch (error) {
+        console.error(error);
+        await SNSPublish("BroadcastListID", `${error}`);
+        return undefined;
+    }
+}
+
+async function BroadcastUpdatePositionInfo(db, broadcast_list_id, position, account) {
+    //const market_position       = position.market_position;
+    //const quantity              = position.quantity;
+    //const average_price         = position.average_price;
+    const { instrument, ...position_to_save} = position;
+
+    //const account_name          = account.account_name;
+    //const provider              = account.provider;
+
+    await db.update({
+        TableName: BroadcastPositionInfoTableName,
+        Key: { broadcast_list_id },
+        ExpressionAttributeNames: { '#instrument': instrument },
+        ExpressionAttributeValues: { ":var1": { ...position_to_save, ...account, last_update: new Date().getTime() } },
+        UpdateExpression: `SET #instrument = :var1`,
+        ReturnValues: "NONE"
+    }).promise();
+}
+
+async function BroadcastGetPositionInfo(db, broadcast_list_id) {
+    console.log("BroadcastGetPositionInfo", broadcast_list_id);
+    try {
+        const data = await db.query({
+            TableName: BroadcastPositionInfoTableName,
+            KeyConditionExpression: "broadcast_list_id = :val1",
+            ExpressionAttributeValues: {
+                ":val1": broadcast_list_id
+            },
+        }).promise();
+        let list = [];
+        data.Items.forEach(function(element) {
+            list.push(element);
+        });
+        return list;
+    } catch (error) {
+        console.error(error);
+        return [];
+    }
 }
 
 async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credits, machine_id, unsigned_machine_id, bkp, connectedAt) {
@@ -708,6 +777,18 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
 
     // The same code as above is listed in change_machine_id method, if you change it here, please change it there
     let broadcast_list = await BroadcastList(db, machine_id);
+
+    for (var i = 0; i < broadcast_list.length; i++) {
+        const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+        delete broadcast_list[i].broadcast_list_id;
+
+        const positions = await BroadcastGetPositionInfo(db, broadcast_list_id);
+        if (positions.length > 0) {
+            broadcast_list[i]["positions"] = positions[0];
+            delete broadcast_list[i].positions.broadcast_list_id;
+        }
+    }
+
     return {
         action: "node_info",
         payload: {
@@ -717,6 +798,27 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
         }
     };
 };
+
+functions.positioninfo = async function(headers, paths, requestContext, body, db, isProd) {
+    console.log(body);
+    
+    const machine_id            = body.machine_id;
+    
+    const nodes                 = [...new Set(body.nodes)].filter(function (e) { return e != null; });
+    const broadcast_lists       = nodes.filter(function(n) { return n.startsWith("@LST") });
+
+    if (broadcast_lists !== undefined && broadcast_lists.length > 0) {
+        await Promise.all(broadcast_lists.map(async (broadcast_list_id_local) => {
+            const broadcast_list_id = await BroadcastListIDFromOwner(db, broadcast_list_id_local, machine_id);
+            if (broadcast_list_id != undefined) {
+                // aqui sim podemos guardar a info
+                await BroadcastUpdatePositionInfo(db, broadcast_list_id, body.position, body.account);
+            }
+        }));
+    }
+
+    return true;
+}
 
 /**
  * PUT machine ID from FlowBots WordPress API

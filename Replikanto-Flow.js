@@ -395,9 +395,9 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 if (telegram_chat_id !== undefined) {
                     await SNSPublish("Replikanto Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${stateName}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`, telegram_chat_id);
                 }
-                if (telegram_chat_id === undefined || TopicAdmChatID != telegram_chat_id) {
-                    await SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${stateName}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`);
-                }
+                //if (telegram_chat_id === undefined || TopicAdmChatID != telegram_chat_id) {
+                    //await SNSPublish("Broadcast", `${broadcast_name}\nOrder ${trade.id}\nState: ${stateName}${tradeName}\nAction: ${trade.orderAction}\nInstrument: ${trade.instrument}\nQuantity: ${trade.quantity}\nType: ${trade.orderType}\nLimit Price: ${trade.limitPrice}\nStop Price: ${trade.stopPrice}\nTime: ${trade.time.replace(/T/, ' ').replace(/\..+/, '')}`);
+                //}
             } catch (error) {
                 console.error("" + error);
             }
