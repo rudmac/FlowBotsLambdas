@@ -17,6 +17,17 @@ const dynamo = new DynamoDB.DocumentClient({
 
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
 
+function Alias(context) {
+    const arn = context.invokedFunctionArn;
+    //console.log(arn);
+    const arnSplited = arn.split(":");
+    if (arnSplited.length == 8) {
+        const alias = arnSplited[7];
+        return alias;
+    }
+    return undefined;
+}
+
 async function sendToConnection(stage, connection_id, region, data) { // parece que é mais lento do que a função antiga
     //let endpoint = requestContext.domainName + '/' + requestContext.stage;
     const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
@@ -35,7 +46,9 @@ async function sendToConnection(stage, connection_id, region, data) { // parece 
         
         return 200;
     } catch (e) {
-        console.error(connection_id, e.code, e.statusCode);
+        //console.error(e);
+        //console.error(data);
+        console.error(endpoint, connection_id, region, e.code, e.statusCode);
         return e.statusCode;
     }
 }
@@ -58,16 +71,28 @@ async function RemoveConnectionBroadcastList(broadcast_list_id, connection_id, r
     }
 }
 
-exports.handler = async (event) => {
+exports.handler = async (event, context) => {
+    //console.log(event);
+
     let promisses = [];
-    
+
     const connections = event.connections;
     const action = event.action;
     const payload = event.payload;
     const replikanto_version = event.replikanto_version;
     const broadcast_id = event.broadcast_id;
-    const stage = event.requestContext.stage;
-    //console.log(event);
+
+    let stage = "production";
+    try {
+        if (event.requestContext !== undefined) {
+            stage = event.requestContext.stage;
+        } else { // Aqui vem de uma chamada do BroadcastPositionInfo-Stream
+            stage = Alias(context);
+        }
+        stage = (stage === "prod" || stage === "production") ? "production" : "development";
+    } catch (ignored) {
+    }
+    //console.log("stage", stage);
 
     for (let i = 0; i < connections.length; i++) {
         const connection = connections[i];
@@ -89,16 +114,16 @@ exports.handler = async (event) => {
                 console.log(ret);
                 resolve(ret);
             } else if (status_code === 410) { // GoneException
-                console.error(ret);
+                //console.error(ret);
                 const broadcast_list_id = event.broadcast_list_id;
                 console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
                 await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
                 resolve(ret);
             } else if (status_code === 429) { // LimitExceededException
-                console.error(ret);
+                //console.error(ret);
                 reject(ret);
             } else {
-                console.error(ret);
+                //console.error(ret);
                 reject(ret);
             }
         });
@@ -108,7 +133,7 @@ exports.handler = async (event) => {
     try {
         await Promise.all(promisses);
     } catch (e) {
-        console.error("Undefined Error", e);
+        //console.error("Check for log errors"); // os erros já vão sair pois tem log lá em cima
     }
 
     const response = {
