@@ -488,8 +488,21 @@ async function BroadcastUpdatePositionInfo(db, broadcast_list_id, position, acco
         TableName: BroadcastPositionInfoTableName,
         Key: { broadcast_list_id },
         ExpressionAttributeNames: { '#instrument': instrument },
-        ExpressionAttributeValues: { ":var1": { ...position_to_save, ...account, last_update: new Date().getTime() } },
+        ExpressionAttributeValues: { ":var1": { ...position_to_save, ...account, last_update: new Date().getTime(), connected: true } },
         UpdateExpression: `SET #instrument = :var1`,
+        ReturnValues: "NONE"
+    }).promise();
+}
+
+async function BroadcastDisconnectPositionInfo(db, broadcast_list_id, position) {
+    const instrument = position.instrument;
+
+    await db.update({
+        TableName: BroadcastPositionInfoTableName,
+        Key: { broadcast_list_id },
+        ExpressionAttributeNames: { '#instrument': instrument },
+        ExpressionAttributeValues: { ":var1": false },
+        UpdateExpression: `SET #instrument.connected = :var1`,
         ReturnValues: "NONE"
     }).promise();
 }
@@ -800,10 +813,23 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
 };
 
 functions.positioninfo = async function(headers, paths, requestContext, body, db, isProd) {
-    console.log(body);
+    //console.log(body);
     
-    const machine_id            = body.machine_id;
-    
+    let machine_id                  = undefined;
+    try {
+        machine_id = body.machine_id;
+        if (machine_id === undefined) {
+            machine_id = headers["Machine-Id"];
+        }
+        const signed_machine_id_obj = CleanSignedMachineID(machine_id);
+        machine_id                  = signed_machine_id_obj.AssignedMachineId;
+    } catch (error) {
+        const msgInfo = `Unsigned Machine ID ${machine_id} trying to set position info`;
+        console.error(msgInfo);
+        await SNSPublish("Position Info", msgInfo);
+        return false;
+    }
+
     const nodes                 = [...new Set(body.nodes)].filter(function (e) { return e != null; });
     const broadcast_lists       = nodes.filter(function(n) { return n.startsWith("@LST") });
 
@@ -818,7 +844,40 @@ functions.positioninfo = async function(headers, paths, requestContext, body, db
     }
 
     return true;
-}
+};
+
+functions.disconnect_positioninfo = async function(headers, paths, requestContext, body, db, isProd) {
+    /* função fica pendente pois ainda não está certo como fazer...
+    let machine_id                  = undefined;
+    try {
+        machine_id = body.machine_id;
+        if (machine_id === undefined) {
+            machine_id = headers["Machine-Id"];
+        }
+        const signed_machine_id_obj = CleanSignedMachineID(machine_id);
+        machine_id                  = signed_machine_id_obj.AssignedMachineId;
+    } catch (error) {
+        const msgInfo = `Unsigned Machine ID ${machine_id} trying to disconnect position info`;
+        console.error(msgInfo);
+        await SNSPublish("Position Info", msgInfo);
+        return false;
+    }
+
+    const nodes                 = [...new Set(body.nodes)].filter(function (e) { return e != null; });
+    const broadcast_lists       = nodes.filter(function(n) { return n.startsWith("@LST") });
+
+    if (broadcast_lists !== undefined && broadcast_lists.length > 0) {
+        await Promise.all(broadcast_lists.map(async (broadcast_list_id_local) => {
+            const broadcast_list_id = await BroadcastListIDFromOwner(db, broadcast_list_id_local, machine_id);
+            if (broadcast_list_id != undefined) {
+                await BroadcastDisconnectPositionInfo(db, broadcast_list_id, body.position);
+            }
+        }));
+    }
+    */
+    return true;
+};
+
 
 /**
  * PUT machine ID from FlowBots WordPress API

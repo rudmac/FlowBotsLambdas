@@ -67,7 +67,7 @@ async function RemoveConnectionBroadcastList(broadcast_list_id, connection_id, r
             ReturnValues: "NONE"
         }).promise();
     } catch (error) {
-        console.error(error);
+        console.error("RemoveConnectionBroadcastList", error);
     }
 }
 
@@ -81,6 +81,8 @@ exports.handler = async (event, context) => {
     const payload = event.payload;
     const replikanto_version = event.replikanto_version;
     const broadcast_id = event.broadcast_id;
+
+    console.log("action", action);
 
     let stage = "production";
     try {

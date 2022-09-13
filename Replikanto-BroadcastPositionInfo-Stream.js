@@ -59,7 +59,7 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id) {
         const data = await db.query({
             TableName: BroadcastTableName,
             KeyConditionExpression: "broadcast_list_id = :val1",
-            ProjectionExpression: "connection_ids, broadcast_id, broadcast_name, telegram_chat_id",
+            ProjectionExpression: "connection_ids, broadcast_id, broadcast_name, telegram_chat_id, locale, time_zone",
             ExpressionAttributeValues: {
                 ":val1": broadcast_list_id
             },
@@ -73,7 +73,9 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id) {
             broadcast_id: data.Items[0]["broadcast_id"],
             connection_ids: ("connection_ids" in data.Items[0] ? data.Items[0]["connection_ids"].values : []),
             broadcast_name: data.Items[0]["broadcast_name"],
-            telegram_chat_id: data.Items[0]["telegram_chat_id"]
+            telegram_chat_id: data.Items[0]["telegram_chat_id"],
+            locale: data.Items[0]["locale"],
+            time_zone: data.Items[0]["time_zone"]
         };
     } catch (error) {
         console.error(error);
@@ -130,9 +132,39 @@ exports.handler = async (event, context) => {
                             id: followersConnections.broadcast_id,
                             name: followersConnections.broadcast_name,
                             positions: position_info
-                        }
+                        },
+                        broadcast_list_id
                     })
                 }).promise());
+            }
+
+            if (followersConnections.telegram_chat_id !== undefined && followersConnections.telegram_chat_id !== 0) {
+                let position_description = "";
+                const connected = position_info.connected;
+                Object.keys(position_info)
+                    .forEach(function eachKey(key, idx, array) {
+                        const payload = position_info[key];
+                        if (payload !== undefined && typeof payload === "object") {
+                            var lastUpdateDate = new Date(payload.last_update);
+
+                            const locale = followersConnections.locale;
+                            const timeZone = followersConnections.time_zone;
+                            let localeDateString = lastUpdateDate.toLocaleString();
+                            if (locale !== undefined && timeZone != undefined) {
+                                localeDateString = lastUpdateDate.toLocaleString(locale, {timeZone});
+                            }
+                            const connected = payload.connected;
+
+                            //let description = `Instrument: *${key}*\nQuantity: ${payload.quantity}\nMarket Position: ${payload.market_position}\nAverage Price: ${payload.average_price}\nLast Update: ${localeDateString}\n${connected ? "Connected" : "Disconnected"}`;
+                            let description = `Instrument: *${key}*\nQuantity: ${payload.quantity}\nMarket Position: ${payload.market_position}\nAverage Price: ${payload.average_price}\nLast Update: ${localeDateString}`;
+                            if (idx === array.length - 1) {
+                                position_description = position_description + description;
+                            } else {
+                                position_description = position_description + description + "\n---\n";
+                            }
+                        }
+                });
+                await SNSPublish("Replikanto Broadcast Position(s)", `${followersConnections.broadcast_name}\n---\n${position_description}`, followersConnections.telegram_chat_id);
             }
         } else if (event_name === "REMOVE") {
             
