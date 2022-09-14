@@ -508,7 +508,7 @@ async function BroadcastDisconnectPositionInfo(db, broadcast_list_id, position) 
 }
 
 async function BroadcastGetPositionInfo(db, broadcast_list_id) {
-    console.log("BroadcastGetPositionInfo", broadcast_list_id);
+    //console.log("BroadcastGetPositionInfo", broadcast_list_id);
     try {
         const data = await db.query({
             TableName: BroadcastPositionInfoTableName,

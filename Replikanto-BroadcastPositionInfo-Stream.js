@@ -87,6 +87,10 @@ async function FollowersConnectionBroadcastList(db, broadcast_list_id) {
 exports.handler = async (event, context) => {
     //console.log(event);
     //console.log(context);
+    const response = {
+        statusCode: 200,
+        body: JSON.stringify({}),
+    };
 
     const stage = Alias(context);
 
@@ -98,8 +102,9 @@ exports.handler = async (event, context) => {
 
     let broadcast_promisses = [];
 
-    for (let i = 0; i < event.Records.length; i++) {
-        const record = event.Records[i];
+    //for (let i = 0; i < event.Records.length; i++) { // pegar sempre a última informação da posição ao invés de event.Records.length
+        //const record = event.Records[i];
+        const record = event.Records[event.Records.length - 1];
         //console.log(record);
         const event_name = record.eventName;
         const dynamobd = record.dynamodb;
@@ -109,6 +114,7 @@ exports.handler = async (event, context) => {
         let position_info = undefined;
         if (event_name === "MODIFY" || event_name === "INSERT") {
             position_info = DynamoDB.Converter.unmarshall(dynamobd.NewImage);
+            console.log(position_info);
             try {
                 delete position_info.broadcast_list_id;
             } catch (ignored) {
@@ -116,7 +122,8 @@ exports.handler = async (event, context) => {
             
             let followersConnections = await FollowersConnectionBroadcastList(dynamo, broadcast_list_id);
             if (followersConnections === undefined) {
-                continue;
+                //continue;
+                return response;
             }
 
             const connections = followersConnections.connection_ids;
@@ -140,7 +147,6 @@ exports.handler = async (event, context) => {
 
             if (followersConnections.telegram_chat_id !== undefined && followersConnections.telegram_chat_id !== 0) {
                 let position_description = "";
-                const connected = position_info.connected;
                 Object.keys(position_info)
                     .forEach(function eachKey(key, idx, array) {
                         const payload = position_info[key];
@@ -153,7 +159,7 @@ exports.handler = async (event, context) => {
                             if (locale !== undefined && timeZone != undefined) {
                                 localeDateString = lastUpdateDate.toLocaleString(locale, {timeZone});
                             }
-                            const connected = payload.connected;
+                            //const connected = payload.connected;
 
                             //let description = `Instrument: *${key}*\nQuantity: ${payload.quantity}\nMarket Position: ${payload.market_position}\nAverage Price: ${payload.average_price}\nLast Update: ${localeDateString}\n${connected ? "Connected" : "Disconnected"}`;
                             let description = `Instrument: *${key}*\nQuantity: ${payload.quantity}\nMarket Position: ${payload.market_position}\nAverage Price: ${payload.average_price}\nLast Update: ${localeDateString}`;
@@ -170,15 +176,11 @@ exports.handler = async (event, context) => {
             
         }
 
-    }
+    //}
 
     if (broadcast_promisses.length > 0) {
         await Promise.all(broadcast_promisses); 
     }
 
-    const response = {
-        statusCode: 200,
-        body: JSON.stringify({}),
-    };
     return response;
 };
