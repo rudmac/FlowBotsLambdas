@@ -4,3 +4,6 @@
 aws lambda list-event-source-mappings
 // Criar um stream trigger para colocar/retirar as connection ids nos broadcast
 aws lambda create-event-source-mapping --event-source-arn arn:aws:dynamodb:us-east-1:397558275354:table/Replikanto.ConnectionRelation/stream/2021-12-08T18:26:19.243 --function-name arn:aws:lambda:us-east-1:397558275354:function:Replikanto-ConnectionRelation-Stream:prod --batch-size 100 --maximum-batching-window-in-seconds 10 --starting-position LATEST --maximum-retry-attempts 3 --destination-config '{\"OnFailure\": {\"Destination\": \"arn:aws:sns:us-east-1:397558275354:Replikanto-Source-Mapping-Connection-Relation-Broadcast-Failure\"}}'
+
+// Criar um stream trigger para ajustar a posição do líder nos broadcast
+aws lambda create-event-source-mapping --event-source-arn arn:aws:dynamodb:us-east-1:397558275354:table/Replikanto.BroadcastPositionInfo/stream/2022-09-07T21:44:30.633 --function-name arn:aws:lambda:us-east-1:397558275354:function:Replikanto-BroadcastPositionInfo-Stream:prod --batch-size 1 --maximum-batching-window-in-seconds 0 --starting-position LATEST --maximum-retry-attempts 3 --destination-config '{\"OnFailure\": {\"Destination\": \"arn:aws:sns:us-east-1:397558275354:Replikanto-Source-Mapping-Position-Info-Broadcast-Failure\"}}'
