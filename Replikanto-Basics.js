@@ -548,6 +548,26 @@ async function AddConnectionBroadcastList(db, broadcast_list_id, connection_id, 
     }
 }
 
+async function RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region) {
+    try {
+        const connectionIDs = dynamo.createSet([JSON.stringify({
+            connection_id: connection_id,
+            region: region
+        })]);
+        await dynamo.update({
+            TableName: BroadcastTableName,
+            Key: { broadcast_list_id },
+            ExpressionAttributeValues: { ":var1": connectionIDs },
+            UpdateExpression: "delete connection_ids :var1",
+            ReturnValues: "NONE"
+        }).promise();
+        return true;
+    } catch (error) {
+        console.error("RemoveConnectionBroadcastList", error);
+        return false;
+    }
+}
+
 async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credits, machine_id, unsigned_machine_id, bkp, connectedAt) {
     const last_update = connectedAt instanceof Date ? connectedAt.getTime() : connectedAt;
     
@@ -723,6 +743,40 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
 functions.disconnect = async function(headers, paths, requestContext, body, db, isProd) {
     const connection_id = requestContext.connectionId;
 
+    // BEGIN Broadcast list disconnect
+    try {
+        const data = await db.query({
+            TableName: ConnectionTableName,
+            ProjectionExpression: "machine_id, #region_name",
+            KeyConditionExpression: "connection_id = :val",
+            ExpressionAttributeValues: {
+                ":val": connection_id
+            },
+            ExpressionAttributeNames: {
+                "#region_name": "region"
+            }
+        }).promise();
+
+        if (data.Count > 0) {
+            const machine_id = data.Items[0].machine_id;
+            const region = data.Items[0].region;
+
+            let broadcast_list = await BroadcastList(db, machine_id);
+
+            for (var i = 0; i < broadcast_list.length; i++) {
+                const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+                if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
+                    console.log(`Disconnected machine id ${machine_id} with connection id ${connection_id} for broadcast list ${broadcast_list_id} and region ${region}`);
+                } else {
+                    console.error(`Unable to disconnect machine id ${machine_id} with connection id ${connection_id} for broadcast list ${broadcast_list_id}`);
+                }
+            }
+        }
+    } catch (error) {
+        console.error("disconnect", error);
+    }
+    // END Broadcast list disconnect
+
     await db
         .delete({
             TableName: ConnectionTableName,
@@ -731,9 +785,9 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
             }
         })
         .promise();
-    
+
     console.log(`Disconnected connection id ${connection_id}`);
-    
+
     return true;
 };
 
@@ -911,7 +965,6 @@ functions.disconnect_positioninfo = async function(headers, paths, requestContex
     */
     return true;
 };
-
 
 /**
  * PUT machine ID from FlowBots WordPress API
