@@ -125,8 +125,10 @@ exports.handler = async (event) => {
             machine_id = dynamobd.OldImage.machine_id.S;
             region = dynamobd.OldImage.region.S;
         } else if (event_name === "INSERT") {
-            machine_id = dynamobd.NewImage.machine_id.S;
-            region = dynamobd.NewImage.region.S;
+            // Já está sendo adicionado ao dar o connect na lambda Basics
+            continue;
+            //machine_id = dynamobd.NewImage.machine_id.S;
+            //region = dynamobd.NewImage.region.S;
         } else {
             console.log(event_name, "undefined");
             continue;
@@ -137,13 +139,17 @@ exports.handler = async (event) => {
         if (broadcast_list.length > 0) {
             for (let i = 0; i < broadcast_list.length; i++) {
                 const broadcast_list_id = broadcast_list[i];
-                if (event_name === "INSERT") {
-                    console.log(event_name, broadcast_list_id, connection_id, region);
-                    await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
-                    //console.log("done");
-                } else if (event_name === "REMOVE") {
+                if (!broadcast_list_id || broadcast_list_id === "Empty") { //empty string, false, 0, null, undefined, ...
+                    continue;
+                }
+                if (event_name === "REMOVE") {
                     console.log(event_name, broadcast_list_id, connection_id, region);
                     await RemoveConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
+                    //console.log("done");
+                } else if (event_name === "INSERT") {
+                    // Não será executado, pois está sendo utilizado o connect no Basic para adicionar a conection id no broadcast list
+                    console.log(event_name, broadcast_list_id, connection_id, region);
+                    await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region);
                     //console.log("done");
                 }
             }
@@ -151,7 +157,7 @@ exports.handler = async (event) => {
             console.log(event_name, "Empty Broadcast List", connection_id, region);
         }
         //console.log(event_name, dynamobd, connection_id, machine_id);
-    };
+    }
 
     const response = {
         statusCode: 200,
