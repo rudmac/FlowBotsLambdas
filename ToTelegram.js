@@ -1,8 +1,5 @@
 const https = require('https');
 
-//const chat_id = process.env.CHAT_ID;
-//const token = process.env.TOKEN;
-
 exports.handler = async (event) => {
     const payload = JSON.parse(event['Records'][0]['Sns']['Message']);
     const subject = event['Records'][0]['Sns']['Subject'];
@@ -10,19 +7,33 @@ exports.handler = async (event) => {
     const chat_id = "" + payload.chat_id;
     const token = payload.token;
 
-    const data = jsonEncode({
+    //if (chat_id !== "-1001715515414") {
+        //return {
+            //statusCode: 200
+        //};
+    //}
+
+    const dataObj = {
         chat_id: chat_id, 
         text: `*${subject}* - ${payload.msg}`,
         parse_mode: "markdown" // or html
-    });
+    };
     
-    console.log(data.text);
+    const data = jsonEncode(dataObj);
 
     return httpsrequest(data, token).then(() => {
-        const response = {
+        console.log(dataObj.text);
+        return {
             statusCode: 200
         };
-        return response;
+    }).catch(error => {
+        const errorMsg = error.message;
+        console.error(errorMsg, dataObj.text);
+        let statusCode = errorMsg.match(/\d/g);
+        statusCode = statusCode.join("");
+        return {
+            statusCode
+        };
     });
 };
 
@@ -41,7 +52,7 @@ function httpsrequest(data, token) {
 
         const req = https.request(options, (res) => {
             if (res.statusCode < 200 || res.statusCode >= 300) {
-                return reject(new Error('statusCode = ' + res.statusCode));
+                return reject(new Error('statusCode=' + res.statusCode));
             }
             var body = [];
             res.on('data', function(chunk) {
