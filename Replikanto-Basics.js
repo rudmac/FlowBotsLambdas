@@ -528,6 +528,26 @@ async function BroadcastGetPositionInfo(db, broadcast_list_id) {
     }
 }
 
+async function AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region) {
+    try {
+        const connectionIDs = db.createSet([JSON.stringify({
+            connection_id: connection_id,
+            region: region
+        })]);
+        await db.update({
+            TableName: BroadcastTableName,
+            Key: { broadcast_list_id },
+            ExpressionAttributeValues: { ":var1": connectionIDs },
+            UpdateExpression: "add connection_ids :var1",
+            ReturnValues: "NONE"
+        }).promise();
+        return true;
+    } catch (error) {
+        console.error(error);
+        return false;
+    }
+}
+
 async function ReplaceMachineID(db, old_machine_id, old_replikanto_id, old_credits, machine_id, unsigned_machine_id, bkp, connectedAt) {
     const last_update = connectedAt instanceof Date ? connectedAt.getTime() : connectedAt;
     
@@ -679,8 +699,21 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
             }
         })
         .promise();
-    
-    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version} and region ${region}`);
+
+    let broadcast_list = await BroadcastList(db, machine_id);
+
+    let broacast_list_log = "";
+    for (var i = 0; i < broadcast_list.length; i++) {
+        const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+        if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
+            console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+        } else {
+            //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+            broacast_list_log = broacast_list_log + " " + broadcast_list_id;
+        }
+    }
+
+    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}, region ${region} and broadcast list ${broacast_list_log}`);
 
     // TODO se tiver algum trade pendente para receber, que seja agora... Será que dá?
     
@@ -838,6 +871,7 @@ functions.positioninfo = async function(headers, paths, requestContext, body, db
             const broadcast_list_id = await BroadcastListIDFromOwner(db, broadcast_list_id_local, machine_id);
             if (broadcast_list_id != undefined) {
                 // aqui sim podemos guardar a info
+                console.log(broadcast_list_id, body.position);
                 await BroadcastUpdatePositionInfo(db, broadcast_list_id, body.position, body.account);
             }
         }));
