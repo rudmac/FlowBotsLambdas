@@ -145,7 +145,7 @@ exports.handler = async (event, context) => {
                         const new_connection_id = data.Items[0]["connection_id_new"];
                         const new_region = data.Items[0]["region"];
                         if (new_connection_id === undefined || new_region == undefined) {
-                            console.error(ret_obj, ret_obj.code, `${ConnectDisconnectTableName} has old coonnection but not the new one yet`);
+                            console.error(ret, ret_obj.code, "Not yet reconnected");
                             reject(ret);
                         } else {
                             const status_code_2_obj = await sendToConnection(stage, new_connection_id, new_region, {
@@ -163,12 +163,12 @@ exports.handler = async (event, context) => {
                                 console.log(ret2, {connection_id_old: connection_obj.connection_id});
                                 resolve(ret2);
                             } else {
-                                console.error(ret2, status_code_2_obj.code, `Unable to send data to a new connection ${new_connection_id}`);
+                                console.error(ret2, status_code_2_obj.code, `Unable to send to new connection ${new_connection_id}`);
                                 reject(ret2);
                             }
                         }
                     } else {
-                        console.error(ret, ret_obj.code, "Old connection does not persist in the database");
+                        console.error(ret, ret_obj.code, "Is not persisted in the database");
                         reject(ret);
                     }
                 } catch (error) {
