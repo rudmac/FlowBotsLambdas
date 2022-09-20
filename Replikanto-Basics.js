@@ -767,6 +767,9 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
 functions.disconnect = async function(headers, paths, requestContext, body, db, isProd) {
     const connection_id = requestContext.connectionId;
 
+    let machine_id = undefined;
+    let region = undefined;
+    let isLogged = false;
     // BEGIN Broadcast list disconnect
     try {
         const data = await db.query({
@@ -782,39 +785,44 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
         }).promise();
 
         if (data.Count > 0) {
-            const machine_id = data.Items[0].machine_id;
-            const region = data.Items[0].region;
+            machine_id = data.Items[0].machine_id;
+            region = data.Items[0].region;
 
             let broadcast_list = await BroadcastList(db, machine_id);
-
-            for (var i = 0; i < broadcast_list.length; i++) {
-                const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-                if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
-                    console.log(`Disconnected id ${connection_id} for machine id ${machine_id} for broadcast list ${broadcast_list_id} and region ${region}`);
-                } else {
-                    console.error(`Unable to disconnect id ${connection_id} for machine id ${machine_id} for broadcast list ${broadcast_list_id} and region ${region}`);
-                }
-            }
-
-            const disconnectStatusCode = requestContext.disconnectStatusCode;
-            const eventType = requestContext.eventType;
-            const disconnectReason = requestContext.disconnectReason;
-            if (disconnectStatusCode === 1001 && eventType === "DISCONNECT" && disconnectReason === "Going away") { // Reconnection flags
-                const disconnection_time = new Date().getTime();
-                const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 1 segundo
-                await db.put({
-                    TableName: ConnectDisconnectTableName,
-                    Item: {
-                        machine_id,
-                        connection_id_old: connection_id,
-                        disconnection_time,
-                        connection_id_new: undefined,
-                        connection_time: undefined,
-                        ttl,
-                        region
+            if (broadcast_list.length > 0) {
+                let broacast_list_log = [];
+                for (var i = 0; i < broadcast_list.length; i++) {
+                    const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+                    if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
+                        broacast_list_log.push(broadcast_list_id);
+                    } else {
+                        console.error(`Unable to disconnect id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast list ${broadcast_list_id}`);
                     }
-                })
-                .promise();
+                }
+                if (broacast_list_log.length > 0) {
+                    console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
+                    isLogged = true;
+                }
+                const disconnectStatusCode = requestContext.disconnectStatusCode;
+                const eventType = requestContext.eventType;
+                const disconnectReason = requestContext.disconnectReason;
+                if (disconnectStatusCode === 1001 && eventType === "DISCONNECT" && disconnectReason === "Going away") { // Reconnection flags
+                    const disconnection_time = new Date().getTime();
+                    const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 1 segundo
+                    await db.put({
+                        TableName: ConnectDisconnectTableName,
+                        Item: {
+                            machine_id,
+                            connection_id_old: connection_id,
+                            disconnection_time,
+                            connection_id_new: undefined,
+                            connection_time: undefined,
+                            ttl,
+                            region
+                        }
+                    })
+                    .promise();
+                }
             }
         }
     } catch (error) {
@@ -831,7 +839,9 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
         })
         .promise();
 
-    console.log(`Disconnected id ${connection_id}`);
+    if (!isLogged) {
+        console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id} and region ${region}`);
+    }
 
     return true;
 };
