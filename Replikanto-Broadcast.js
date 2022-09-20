@@ -16,6 +16,7 @@ const dynamo = new DynamoDB.DocumentClient({
 });
 
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
+const ConnectDisconnectTableName = process.env.DYNAMODB_TABLE_CONNECT_DISCONNECT;
 
 function Alias(context) {
     const arn = context.invokedFunctionArn;
@@ -44,12 +45,14 @@ async function sendToConnection(stage, connection_id, region, data) { // parece 
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
         
-        return 200;
+        return {
+            statusCode: 200,
+            code: "Success"
+        };
     } catch (e) {
         //console.error(e);
         //console.error(data);
-        console.error(endpoint, connection_id, region, e.code, e.statusCode);
-        return e.statusCode;
+        return e;
     }
 }
 
@@ -101,7 +104,7 @@ exports.handler = async (event, context) => {
         const connection_obj = JSON.parse(connection);
         //console.log(connection_obj);
         let promise = new Promise(async (resolve, reject) => {
-            const status_code = await sendToConnection(stage, connection_obj.connection_id, connection_obj.region, {
+            const ret_obj = await sendToConnection(stage, connection_obj.connection_id, connection_obj.region, {
                 action,
                 payload,
                 replikanto_version,
@@ -110,22 +113,73 @@ exports.handler = async (event, context) => {
             let ret = {
                 connection_id: connection_obj.connection_id,
                 region: connection_obj.region,
-                status: status_code
+                status: ret_obj.statusCode
             };
-            if (status_code === 200) {
+            if (ret.status === 200) {
                 console.log(ret);
                 resolve(ret);
-            } else if (status_code === 410) { // GoneException
+            } else if (ret.status === 410) { // GoneException
                 //console.error(ret);
-                const broadcast_list_id = event.broadcast_list_id;
-                console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
-                await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
-                resolve(ret);
-            } else if (status_code === 429) { // LimitExceededException
-                //console.error(ret);
+                
+                //Já está sendo removido pelo disconnect da Basics.
+                //const broadcast_list_id = event.broadcast_list_id;
+                //console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
+                //await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
+                try {
+                    const data = await dynamo.query({
+                        TableName: ConnectDisconnectTableName,
+                        IndexName: "OldConnectionID",
+                        ProjectionExpression: "connection_id_new, #region_name",
+                        KeyConditionExpression: "connection_id_old = :val1",
+                        ExpressionAttributeValues: {
+                            ":val1": connection_obj.connection_id,
+                            ":val2": new Date((new Date().getTime() - (1 * 60 * 1000)) / 1000).getTime() // até 1 minuto atrás
+                        },
+                        ExpressionAttributeNames: {
+                            "#region_name": "region"
+                        },
+                        FilterExpression: "disconnection_time >= :val2"
+                    }).promise();
+
+                    if (data.Count > 0) {
+                        const new_connection_id = data.Items[0]["connection_id_new"];
+                        const new_region = data.Items[0]["region"];
+                        if (new_connection_id === undefined || new_region == undefined) {
+                            console.error(ret_obj, ret_obj.code, `${ConnectDisconnectTableName} has old coonnection but not the new one yet`);
+                            reject(ret);
+                        } else {
+                            const status_code_2_obj = await sendToConnection(stage, new_connection_id, new_region, {
+                                action,
+                                payload,
+                                replikanto_version,
+                                broadcast_id
+                            });
+                            let ret2 = {
+                                connection_id: new_connection_id,
+                                region: new_region,
+                                status: status_code_2_obj.statusCode
+                            };
+                            if (ret2.status === 200) {
+                                console.log(ret2, {connection_id_old: connection_obj.connection_id});
+                                resolve(ret2);
+                            } else {
+                                console.error(ret2, status_code_2_obj.code, `Unable to send data to a new connection ${new_connection_id}`);
+                                reject(ret2);
+                            }
+                        }
+                    } else {
+                        console.error(ret, ret_obj.code, "Old connection does not persist in the database");
+                        reject(ret);
+                    }
+                } catch (error) {
+                    console.error(error);
+                    console.error(ret, ret_obj.code);
+                }
+            } else if (ret.status === 429) { // LimitExceededException
+                console.error(ret, ret_obj.code);
                 reject(ret);
             } else {
-                //console.error(ret);
+                console.error(ret, ret_obj.code);
                 reject(ret);
             }
         });
