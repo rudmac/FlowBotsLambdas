@@ -133,7 +133,7 @@ exports.handler = async (event, context) => {
                         KeyConditionExpression: "connection_id_old = :val1",
                         ExpressionAttributeValues: {
                             ":val1": connection_obj.connection_id,
-                            ":val2": new Date((new Date().getTime() - (1 * 60 * 1000)) / 1000).getTime() // até 1 minuto atrás
+                            ":val2": new Date(new Date().getTime() - (1 * 60 * 1000)).getTime() // até 1 minuto atrás
                         },
                         ExpressionAttributeNames: {
                             "#region_name": "region"
@@ -168,7 +168,7 @@ exports.handler = async (event, context) => {
                             }
                         }
                     } else {
-                        console.error(ret, ret_obj.code, "Is not persisted in the database");
+                        console.error(ret, ret_obj.code, `Is not persisted in the database or disconnection_time is older`);
                         reject(ret);
                     }
                 } catch (error) {
