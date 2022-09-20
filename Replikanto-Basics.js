@@ -23,6 +23,7 @@ const dynamo = new DynamoDB.DocumentClient({
 });
 
 const ConnectionTableName = process.env.DYNAMODB_TABLE_CONNECTION;
+const ConnectDisconnectTableName = process.env.DYNAMODB_TABLE_CONNECT_DISCONNECT;
 const MachineIDTableName = process.env.DYNAMODB_TABLE_MACHINE_ID;
 const ActiveMachineIDTableName = process.env.DYNAMODB_TABLE_ACTIVE_MACHINE_ID;
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
@@ -722,18 +723,41 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
 
     let broadcast_list = await BroadcastList(db, machine_id);
 
-    let broacast_list_log = "";
-    for (var i = 0; i < broadcast_list.length; i++) {
-        const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-        if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
-            console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-        } else {
-            //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-            broacast_list_log = broacast_list_log + " " + broadcast_list_id;
+    let broacast_list_log = [];
+    if (broadcast_list.length > 0) {
+        for (var i = 0; i < broadcast_list.length; i++) {
+            const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+            if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
+                console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+            } else {
+                //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+                broacast_list_log.push(broadcast_list_id);
+            }
+        }
+
+        try {
+            await db.update({
+                TableName: ConnectDisconnectTableName,
+                Key: { machine_id },
+                ExpressionAttributeValues: { ":var1": connection_id, ":var2": new Date().getTime(), ":var3": region },
+                UpdateExpression: `set connection_id_new=:var1, connection_time=:var2, #region_name=:var3`,
+                ConditionExpression: "attribute_exists(machine_id)",
+                ExpressionAttributeNames: {
+                    "#region_name": "region"
+                },
+                ReturnValues: "NONE"
+            }).promise();
+            // Pegar o broadcast machine id list e enviar os trades pendentes.
+        } catch (error) {
+            if (error.name === "ConditionalCheckFailedException") {
+                console.log(`Machine ID ${machine_id} is not a reconection`);
+            } else {
+                console.error("connect", error);
+            }
         }
     }
 
-    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}, region ${region} and broadcast list ${broacast_list_log}`);
+    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
 
     // TODO se tiver algum trade pendente para receber, que seja agora... Será que dá?
     
@@ -766,10 +790,31 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
             for (var i = 0; i < broadcast_list.length; i++) {
                 const broadcast_list_id = broadcast_list[i].broadcast_list_id;
                 if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
-                    console.log(`Disconnected machine id ${machine_id} with connection id ${connection_id} for broadcast list ${broadcast_list_id} and region ${region}`);
+                    console.log(`Disconnected id ${connection_id} for machine id ${machine_id} for broadcast list ${broadcast_list_id} and region ${region}`);
                 } else {
-                    console.error(`Unable to disconnect machine id ${machine_id} with connection id ${connection_id} for broadcast list ${broadcast_list_id}`);
+                    console.error(`Unable to disconnect id ${connection_id} for machine id ${machine_id} for broadcast list ${broadcast_list_id} and region ${region}`);
                 }
+            }
+
+            const disconnectStatusCode = requestContext.disconnectStatusCode;
+            const eventType = requestContext.eventType;
+            const disconnectReason = requestContext.disconnectReason;
+            if (disconnectStatusCode === 1001 && eventType === "DISCONNECT" && disconnectReason === "Going away") { // Reconnection flags
+                const disconnection_time = new Date().getTime();
+                const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 1 segundo
+                await db.put({
+                    TableName: ConnectDisconnectTableName,
+                    Item: {
+                        machine_id,
+                        connection_id_old: connection_id,
+                        disconnection_time,
+                        connection_id_new: undefined,
+                        connection_time: undefined,
+                        ttl,
+                        region
+                    }
+                })
+                .promise();
             }
         }
     } catch (error) {
@@ -786,7 +831,7 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
         })
         .promise();
 
-    console.log(`Disconnected connection id ${connection_id}`);
+    console.log(`Disconnected id ${connection_id}`);
 
     return true;
 };
