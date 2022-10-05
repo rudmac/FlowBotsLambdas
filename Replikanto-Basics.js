@@ -6,7 +6,6 @@ var crypto = require('crypto');
 const DynamoDB = require('aws-sdk/clients/dynamodb');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
 const SNS = require('aws-sdk/clients/sns');
-const Lambda = require('aws-sdk/clients/lambda');
 const region = process.env.AWS_REGION;
 
 const dynamoDbConfig = new DynamoDB({
@@ -21,11 +20,6 @@ const dynamoDbConfig = new DynamoDB({
 
 const dynamo = new DynamoDB.DocumentClient({
     service: dynamoDbConfig
-});
-
-const lambda = new Lambda({
-    apiVersion: "2015-03-31",
-    endpoint: `lambda.${region}.amazonaws.com`
 });
 
 const ConnectionTableName = process.env.DYNAMODB_TABLE_CONNECTION;
@@ -376,10 +370,10 @@ async function LicenseType(machine_id, product_name, isProd) {
     throw `License Type Undefined for machine id ${machine_id}`;
 }
 
-async function BroadcastList(machine_id) {
+async function BroadcastList(db, machine_id) {
     try {
         //console.log("BroadcastList", machine_id);
-        const data = await dynamo.scan({
+        const data = await db.scan({
             TableName: BroadcastTableName,
             ProjectionExpression: "broadcast_list_id, broadcast_id, broadcast_name",
             FilterExpression: "contains (followers_machine_ids, :val)",
@@ -535,13 +529,13 @@ async function BroadcastGetPositionInfo(db, broadcast_list_id) {
     }
 }
 
-async function AddConnectionBroadcastList(broadcast_list_id, connection_id, region) {
+async function AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region) {
     try {
-        const connectionIDs = dynamo.createSet([JSON.stringify({
+        const connectionIDs = db.createSet([JSON.stringify({
             connection_id: connection_id,
             region: region
         })]);
-        await dynamo.update({
+        await db.update({
             TableName: BroadcastTableName,
             Key: { broadcast_list_id },
             ExpressionAttributeValues: { ":var1": connectionIDs },
@@ -727,114 +721,33 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         })
         .promise();
 
-    let broadcast_list = await BroadcastList(machine_id);
+    let broadcast_list = await BroadcastList(db, machine_id);
 
     let broacast_list_log = [];
     if (broadcast_list.length > 0) {
+        for (var i = 0; i < broadcast_list.length; i++) {
+            const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+            if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
+                console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+            } else {
+                //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+                broacast_list_log.push(broadcast_list_id);
+            }
+        }
+
         try {
-            let conDisData = undefined;
-            const connection_time = new Date().getTime();
-            try {
-                conDisData = await db.update({
-                    TableName: ConnectDisconnectTableName,
-                    Key: { machine_id },
-                    ExpressionAttributeValues: { ":var1": connection_id, ":var2": connection_time, ":var3": region },
-                    UpdateExpression: `set connection_id_new=:var1, connection_time=:var2, #region_name=:var3`,
-                    ConditionExpression: "attribute_exists(machine_id)",
-                    ExpressionAttributeNames: {
-                        "#region_name": "region"
-                    },
-                    ReturnValues: "ALL_NEW"
-                }).promise();
-            } catch (error) {
-                console.error("Updating the Connect Disconnect table", error);
-            }
-
-            for (var i = 0; i < broadcast_list.length; i++) {
-                const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-                if (!await AddConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
-                    console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-                } else {
-                    try {
-                        let old_connection_id = conDisData.Attributes.connection_id_old;
-                        // Assim que for adicionado o novo connection ID, então pode remover o antigo
-                        if (await RemoveConnectionBroadcastList(broadcast_list_id, old_connection_id, region)) {
-                            console.log(`Disconnected id ${old_connection_id} for Machine ID ${machine_id}, region ${region} and broadcast list ${broadcast_list_id}`);
-                        } else {
-                            console.error(`Unable to disconnect id ${old_connection_id} for Machine ID ${machine_id}, region ${region} and broadcast list ${broadcast_list_id}`);
-                        }
-                    } catch (error) {
-                        console.error("Removing the old connection id from", broadcast_list_id, error);
-                    }
-                    
-                    //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-                    broacast_list_log.push(broadcast_list_id);
-                }
-            }
-
+            await db.update({
+                TableName: ConnectDisconnectTableName,
+                Key: { machine_id },
+                ExpressionAttributeValues: { ":var1": connection_id, ":var2": new Date().getTime(), ":var3": region },
+                UpdateExpression: `set connection_id_new=:var1, connection_time=:var2, #region_name=:var3`,
+                ConditionExpression: "attribute_exists(machine_id)",
+                ExpressionAttributeNames: {
+                    "#region_name": "region"
+                },
+                ReturnValues: "NONE"
+            }).promise();
             // Pegar o broadcast machine id list e enviar os trades pendentes.
-            if (conDisData && "Attributes" in conDisData) {
-                if ("lost_data" in conDisData.Attributes) { // Verificar se tem o lost data
-                    try {
-                        let lost_data = conDisData.Attributes.lost_data;
-                        console.log(lost_data.length, "lost data for Machine ID", machine_id);
-                        if (conDisData.Attributes.disconnection_time < new Date(connection_time - (1 * 5 * 1000)).getTime()) { // até 5 segundos atrás
-                            // somente se a desconexão ocorreu em até 5 segundos atrás...
-                            console.log("Lost data will be descarted as disconnection time", conDisData.Attributes.disconnection_time ,"is older than 5 seconds");
-                        } else {
-                            lost_data.sort(function(a, b) {
-                                var keyA = a.time, keyB = b.time;
-                                if (keyA < keyB) return -1;
-                                if (keyA > keyB) return 1;
-                                return 0;
-                            });
-                            let actionsToSend = [];
-                            let payloadsToSend = [];
-                            let delay = [];
-                            let replikantoversionToSend;
-                            let broadcastIDToSend;
-                            for (var i = 0; i < lost_data.length; i++) {
-                                const time = lost_data[i]["time"];
-                                if (time >= conDisData.Attributes.disconnection_time && time < connection_time) {
-                                    const data = JSON.parse(lost_data[i]["data"]);
-                                    console.log("Data", i+1, data);
-                                    actionsToSend.push(data.action);
-                                    payloadsToSend.push(data.payload);
-                                    if (i > 0) {
-                                        delay.push(time - lost_data[i - 1]["time"]);
-                                    } else {
-                                        delay.push(0);
-                                    }
-                                    replikantoversionToSend = data.replikanto_version;
-                                    broadcastIDToSend = data.broadcast_id;
-                                }
-                            }
-                            if (actionsToSend.length > 0) {
-                                const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
-                                console.log(FunctionName, "broadcasting", actionsToSend.length, "processed lost data");
-                                await lambda.invokeAsync({
-                                    FunctionName,
-                                    InvokeArgs: JSON.stringify({
-                                        connections: [JSON.stringify({connection_id, region})],
-                                        action: actionsToSend,
-                                        payload: payloadsToSend,
-                                        replikanto_version: replikantoversionToSend,
-                                        broadcast_id: broadcastIDToSend,
-                                        requestContext,
-                                        fromLost: true,
-                                        delay
-                                    })
-                                }).promise();
-                                console.log(`${FunctionName} sent broadcast lost data`);
-
-                                // TODO remover os dados da tabela ConnectDisconnectTableName
-                            }
-                        }
-                    } catch (error) {
-                        console.error(error);
-                    }
-                }
-            }
         } catch (error) {
             if (error.name === "ConditionalCheckFailedException") {
                 console.log(`Machine ID ${machine_id} is not a reconection`);
@@ -844,7 +757,7 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         }
     }
 
-    console.log(`Connected id ${connection_id} for Machine ID ${machine_id}, product ${product_name}, version ${replikanto_version}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
+    console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
 
     // TODO se tiver algum trade pendente para receber, que seja agora... Será que dá?
     
@@ -875,9 +788,8 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
             machine_id = data.Items[0].machine_id;
             region = data.Items[0].region;
 
-            let broadcast_list = await BroadcastList(machine_id);
+            let broadcast_list = await BroadcastList(db, machine_id);
             if (broadcast_list.length > 0) {
-                /* Será removido no momento da conexão, para não ter gap de informação enviada
                 let broacast_list_log = [];
                 for (var i = 0; i < broadcast_list.length; i++) {
                     const broadcast_list_id = broadcast_list[i].broadcast_list_id;
@@ -891,14 +803,12 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
                     console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
                     isLogged = true;
                 }
-                */
                 const disconnectStatusCode = requestContext.disconnectStatusCode;
                 const eventType = requestContext.eventType;
                 const disconnectReason = requestContext.disconnectReason;
-                //TEST
                 if (disconnectStatusCode === 1001 && eventType === "DISCONNECT" && disconnectReason === "Going away") { // Reconnection flags
                     const disconnection_time = new Date().getTime();
-                    const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 0.1~2 segundos
+                    const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 1 segundo
                     await db.put({
                         TableName: ConnectDisconnectTableName,
                         Item: {
@@ -907,54 +817,12 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
                             disconnection_time,
                             connection_id_new: undefined,
                             connection_time: undefined,
-                            lost_data: undefined,
                             ttl,
                             region
                         }
                     })
                     .promise();
-                    // TEST
-                    /*
-                    const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
-                    await lambda.invokeAsync({
-                        FunctionName,
-                        InvokeArgs: JSON.stringify({
-                            connections: [JSON.stringify({connection_id, region})],
-                            action: "trade",
-                            payload: {
-                                id: '358',
-                                orderId: 'b3499df5739146ee82f47a388e259cd8',
-                                name: '',
-                                oco: '',
-                                orderEntry: 1,
-                                tif: 'Day',
-                                gtd: '2099-12-01',
-                                orderState: 'Submitted',
-                                instrument: 'MNQ 12-22',
-                                orderAction: 'Sell',
-                                limitPrice: 11700,
-                                stopPrice: 0,
-                                averageFillPrice: 0,
-                                quantity: 1,
-                                time: '2022-10-04T18:56:51.5972628',
-                                timeUTC: '2022-10-04T21:56:51.5972628Z',
-                                statementDate: '2022-10-04',
-                                orderType: 'Limit',
-                                opositeFilled: false,
-                                orderUpdates: [],
-                                previouslyOrdersSentTimeSpan: 3000,
-                                ordersPreviouslySent: []
-                            },
-                            replikanto_version: "1.5.2.1",
-                            broadcast_id: "LST-FLOWBOTS-TEST-01",
-                            broadcast_list_id: "@LST-FLOW-TEST",
-                            requestContext
-                        })
-                    }).promise();
-                    */
-                    // END
                 }
-                //END
             }
         }
     } catch (error) {
@@ -1063,7 +931,7 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
     }
 
     // The same code as above is listed in change_machine_id method, if you change it here, please change it there
-    let broadcast_list = await BroadcastList(machine_id);
+    let broadcast_list = await BroadcastList(db, machine_id);
 
     for (var i = 0; i < broadcast_list.length; i++) {
         const broadcast_list_id = broadcast_list[i].broadcast_list_id;
@@ -1311,7 +1179,7 @@ functions.change_machine_id = async function(headers, paths, requestContext, bod
 
                     try {
                         // nodeinfo
-                        let broadcast_list = await BroadcastList(machine_id_to_check);
+                        let broadcast_list = await BroadcastList(db, machine_id_to_check);
                         await sendToConnection(requestContext, connection_id, region, {
                             action: "node_info",
                             payload: {
