@@ -56,6 +56,32 @@ async function sendToConnection(stage, connection_id, region, data) { // parece 
     }
 }
 
+async function getConnection(stage, connection_id, region) {
+    const wsApiId = process.env["WS_API_ID_" + region.toUpperCase().replace(/-/g, "_")];
+    let endpoint = `https://${wsApiId}.execute-api.${region}.amazonaws.com/${stage}`;
+
+    const callbackAPI = new ApiGatewayManagementApi({
+        apiVersion: '2018-11-29',
+        endpoint: endpoint,
+        region
+    });
+
+    var params = {
+        ConnectionId: connection_id
+    };
+
+    try {
+        await callbackAPI
+            .getConnection(params)
+            .promise();
+        
+        return 200;
+    } catch (e) {
+        //console.error(endpoint, connection_id, region, e.code, e.statusCode);
+        return e.statusCode;
+    }
+}
+
 async function RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region) {
     try {
         const connectionIDs = dynamo.createSet([JSON.stringify({
@@ -75,8 +101,6 @@ async function RemoveConnectionBroadcastList(broadcast_list_id, connection_id, r
 }
 
 exports.handler = async (event, context) => {
-    //console.log(event);
-
     let promisses = [];
 
     const connections = event.connections;
@@ -84,6 +108,8 @@ exports.handler = async (event, context) => {
     const payload = event.payload;
     const replikanto_version = event.replikanto_version;
     const broadcast_id = event.broadcast_id;
+    const broadcast_list_id = event.broadcast_list_id;
+    const fromLost = event.fromLost; // se vir de um lost, não salva mais...
 
     console.log("action", action);
 
@@ -104,12 +130,14 @@ exports.handler = async (event, context) => {
         const connection_obj = JSON.parse(connection);
         //console.log(connection_obj);
         let promise = new Promise(async (resolve, reject) => {
-            const ret_obj = await sendToConnection(stage, connection_obj.connection_id, connection_obj.region, {
+            const data_to_send = {
                 action,
                 payload,
                 replikanto_version,
-                broadcast_id
-            });
+                broadcast_id,
+                broadcast_list_id
+            };
+            const ret_obj = await sendToConnection(stage, connection_obj.connection_id, connection_obj.region, data_to_send);
             let ret = {
                 connection_id: connection_obj.connection_id,
                 region: connection_obj.region,
@@ -120,11 +148,6 @@ exports.handler = async (event, context) => {
                 resolve(ret);
             } else if (ret.status === 410) { // GoneException
                 //console.error(ret);
-                
-                //Já está sendo removido pelo disconnect da Basics.
-                //const broadcast_list_id = event.broadcast_list_id;
-                //console.info("Removing", connection_obj.connection_id, "follower from list", broadcast_list_id);
-                //await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
                 try {
                     const data = await dynamo.query({
                         TableName: ConnectDisconnectTableName,
@@ -145,9 +168,56 @@ exports.handler = async (event, context) => {
                         const new_connection_id = data.Items[0]["connection_id_new"];
                         const new_region = data.Items[0]["region"];
                         if (new_connection_id === undefined || new_region == undefined) {
-                            console.error(ret, ret_obj.code, "Not yet reconnected");
-                            reject(ret);
+                            try {
+                                if (fromLost !== true) {
+                                    console.error(ret, ret_obj.code, "Not yet reconnected, it will save lost data for connection event");
+                                    const machine_id = data.Items[0]["machine_id"];
+                                    const lost_data = [{
+                                        "time": new Date().getTime(),
+                                        "data": JSON.stringify(data_to_send)
+                                    }];
+                                    try {
+                                        await dynamo.update({
+                                            TableName: ConnectDisconnectTableName,
+                                            Key: { machine_id },
+                                            ExpressionAttributeValues: { ":var1": lost_data, ':empty_list': [] },
+                                            UpdateExpression: `set #lost_data = list_append(if_not_exists(#lost_data, :empty_list), :var1)`,
+                                            ExpressionAttributeNames: {
+                                                '#lost_data': 'lost_data'
+                                            },
+                                            ReturnValues: "NONE"
+                                        }).promise();
+                                    } catch (error) {
+                                        console.error("Error trying to add lost data to connect/disconnect table for Machine ID", machine_id, lost_data, error);
+                                    }
+                                } else {
+                                    console.error(ret, ret_obj.code, "Not yet reconnected");
+                                }
+                            } catch (error) {
+                                console.error(error);
+                            } finally {
+                                reject(ret);
+                            }
                         } else {
+                            try {
+                                const tryCount = 10;
+                                let tryTimes = 0;
+                                while (await getConnection(stage, new_connection_id, new_region) !== 200) {
+                                    tryTimes++;
+                                    await new Promise(r => setTimeout(r, tryTimes * 50)); // Total 2,75 seconds
+                                    if (tryTimes >= tryCount) {
+                                        console.log("Connection", new_connection_id, "is not ready to receive trades from lost");
+                                        return {
+                                            statusCode: 200,
+                                            body: "",
+                                        };
+                                    }
+                                    console.log("Try", tryTimes, "time(s)");
+                                }
+                                console.log("Connection", new_connection_id, "is ready to receive lost data");
+                            } catch (error) {
+                                console.error("Looping waiting ", new_connection_id, "to be ready");
+                            }
                             const status_code_2_obj = await sendToConnection(stage, new_connection_id, new_region, {
                                 action,
                                 payload,
@@ -169,6 +239,14 @@ exports.handler = async (event, context) => {
                         }
                     } else {
                         console.error(ret, ret_obj.code, `Is not persisted in the database or disconnection_time is older`);
+                        try {
+                            if (broadcast_list_id) {
+                                console.info("Removing", connection_obj.connection_id, "from list", broadcast_list_id);
+                                await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
+                            }
+                        } catch (error) {
+                            console.error("Removing", connection_obj.connection_id);
+                        }
                         reject(ret);
                     }
                 } catch (error) {
