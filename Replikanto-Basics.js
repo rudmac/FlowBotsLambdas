@@ -158,9 +158,8 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
     }
     const wsApiId = process.env["WS_API_ID_" + local_region.toUpperCase().replace(/-/g, "_")];
     let stage = requestContext.stage;
-    if (stage === "test-invoke-stage") {
-        stage = "dev";
-    }
+    stage = (stage === "prod" || stage === "production") ? "production" : "development";
+
     let endpoint = `https://${wsApiId}.execute-api.${local_region}.amazonaws.com/${stage}`;
 
     const callbackAPI = new ApiGatewayManagementApi({
