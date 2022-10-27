@@ -170,6 +170,9 @@ exports.handler = async (event, context) => {
                             }
                         }
                 });
+                if (!position_description) { // position_description was empty string, false, 0, null, undefined, ...
+                    position_description = "No information about positions";
+                }
                 await SNSPublish("Replikanto Broadcast Position(s)", `${followersConnections.broadcast_name}\n---\n${position_description}`, followersConnections.telegram_chat_id);
             }
         } else if (event_name === "REMOVE") {
