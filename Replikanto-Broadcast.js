@@ -17,6 +17,8 @@ const dynamo = new DynamoDB.DocumentClient({
 
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
 const ConnectDisconnectTableName = process.env.DYNAMODB_TABLE_CONNECT_DISCONNECT;
+const ConnectionHistoryTableName = process.env.DYNAMODB_TABLE_CONNECTION_HISTORY;
+const LostDataTableName = process.env.DYNAMODB_TABLE_LOST_DATA;
 
 function Alias(context) {
     const arn = context.invokedFunctionArn;
@@ -109,7 +111,6 @@ exports.handler = async (event, context) => {
     const replikanto_version = event.replikanto_version;
     const broadcast_id = event.broadcast_id;
     const broadcast_list_id = event.broadcast_list_id;
-    const fromLost = event.fromLost; // se vir de um lost, não salva mais...
 
     console.log("action", action);
 
@@ -147,12 +148,66 @@ exports.handler = async (event, context) => {
                 console.log(ret);
                 resolve(ret);
             } else if (ret.status === 410) { // GoneException
-                //console.error(ret);
+                // Pegar o Machine ID da conexão que está no histórico ConnectionHistoryTableName
+                try {
+                    const dataHistory = await dynamo.query({
+                        TableName: ConnectionHistoryTableName,
+                        ProjectionExpression: "machine_id",
+                        KeyConditionExpression: "connection_id = :val",
+                        ExpressionAttributeValues: {
+                            ":val": connection_obj.connection_id
+                        }
+                    }).promise();
+                    if (dataHistory.Count == 0) { // Se não encontrar:
+                        // remover o connection id da lista pois não foi removido da desconexão.
+                        // remover o connection id da lista pois não será removido da desconexão.
+                        console.error(ret, ret_obj.code, `Is not persisted in the database or disconnection_time is older`);
+                        try {
+                            if (broadcast_list_id) {
+                                console.info("Removing", connection_obj.connection_id, "from list", broadcast_list_id);
+                                await RemoveConnectionBroadcastList(broadcast_list_id, connection_obj.connection_id, connection_obj.region);
+                            }
+                        } catch (error) {
+                            console.error("removing", connection_obj.connection_id);
+                        }
+                    } else {
+                        const itemsHistory = dataHistory.Items[0];
+                        const machine_id_history = itemsHistory.machine_id;
+                        // salvar o lost data em alguma tabela
+
+                        const lost_data = [{
+                            "time": new Date().getTime(),
+                            "data": JSON.stringify(data_to_send)
+                        }];
+
+                        await dynamo.update({
+                            TableName: LostDataTableName,
+                            Key: { machine_id: machine_id_history },
+                            ExpressionAttributeValues: { ":var1": lost_data, ':empty_list': [] },
+                            UpdateExpression: `set #lost_data = list_append(if_not_exists(#lost_data, :empty_list), :var1)`,
+                            ExpressionAttributeNames: {
+                                '#lost_data': 'lost_data'
+                            },
+                            ReturnValues: "NONE"
+                        })
+                        .promise();
+                        console.log("Save", machine_id_history, "lost data", data_to_send);
+                    }
+                } catch (error) {
+                    console.error(error);
+                }
+                // TODO criar um lambda para receber o ConnectionHistory stream, e fazer a remoção dos
+                //      connection ids das listas de broadcast pois não são mais necessários
+                //      isso irá evitar acumulação de connection ids nas listas
+
+                console.error(ret, ret_obj.code);
+                reject(ret);
+                /*
                 try {
                     const data = await dynamo.query({
                         TableName: ConnectDisconnectTableName,
                         IndexName: "OldConnectionID",
-                        ProjectionExpression: "connection_id_new, #region_name",
+                        ProjectionExpression: "connection_id_new, #region_name, machine_id",
                         KeyConditionExpression: "connection_id_old = :val1",
                         ExpressionAttributeValues: {
                             ":val1": connection_obj.connection_id,
@@ -253,6 +308,7 @@ exports.handler = async (event, context) => {
                     console.error(error);
                     console.error(ret, ret_obj.code);
                 }
+                */
             } else if (ret.status === 429) { // LimitExceededException
                 console.error(ret, ret_obj.code);
                 reject(ret);

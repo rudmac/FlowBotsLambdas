@@ -28,6 +28,8 @@ const MachineIDTableName = process.env.DYNAMODB_TABLE_MACHINE_ID;
 const ActiveMachineIDTableName = process.env.DYNAMODB_TABLE_ACTIVE_MACHINE_ID;
 const BroadcastTableName = process.env.DYNAMODB_TABLE_BROADCAST;
 const BroadcastPositionInfoTableName = process.env.DYNAMODB_TABLE_BROADCAST_POSITION_INFO;
+const ConnectionHistoryTableName = process.env.DYNAMODB_TABLE_CONNECTION_HISTORY;
+const LostDataTableName = process.env.DYNAMODB_TABLE_LOST_DATA;
 const MD5Key = process.env.MD5Key;
 const MachineIDsBlackList = process.env.MACHINE_IDS_BLACK_LIST.split(',');
 const VendorName = process.env.VENDOR_NAME;
@@ -613,6 +615,7 @@ async function SNSPublish(subject, msg) {
 var functions = [];
 
 functions.connect = async function(headers, paths, requestContext, body, db, isProd) {
+    //console.log(headers, requestContext);
     const connection_id             = requestContext.connectionId;
     const connectedAt               = requestContext.connectedAt;
     const replikanto_version        = headers["Replikanto-Version"];
@@ -733,28 +736,86 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
                 broacast_list_log.push(broadcast_list_id);
             }
         }
-
-        try {
-            await db.update({
-                TableName: ConnectDisconnectTableName,
-                Key: { machine_id },
-                ExpressionAttributeValues: { ":var1": connection_id, ":var2": new Date().getTime(), ":var3": region },
-                UpdateExpression: `set connection_id_new=:var1, connection_time=:var2, #region_name=:var3`,
-                ConditionExpression: "attribute_exists(machine_id)",
-                ExpressionAttributeNames: {
-                    "#region_name": "region"
-                },
-                ReturnValues: "NONE"
-            }).promise();
-            // Pegar o broadcast machine id list e enviar os trades pendentes.
-        } catch (error) {
-            if (error.name === "ConditionalCheckFailedException") {
-                console.log(`Machine ID ${machine_id} is not a reconection`);
-            } else {
-                console.error("connect", error);
+    }
+    
+    try {
+        // TODO fazer via transação, os dois ao mesmo tempo.
+        const disconnection_time = connectedAt;
+        const ttl = new Date((disconnection_time + (2 * 60 * 60 * 1000) + (1 * 60 * 1000)) / 1000).getTime(); // 2hr + 1 minuto no máximo
+        await db.put({
+            TableName: ConnectionHistoryTableName,
+            Item: {
+                connection_id,
+                connectedAt,
+                machine_id,
+                region,
+                ttl
             }
+        })
+        .promise();
+
+        await db.update({
+            TableName: LostDataTableName,
+            Key: { machine_id },
+            ExpressionAttributeValues: { ":var1": connection_id, ":var2": connectedAt, ":var3": region },
+            UpdateExpression: `set connection_id=:var1, connection_time=:var2, #region_name=:var3`,
+            //ConditionExpression: "attribute_exists(machine_id)", // adicionar mesmo que não existe, TODO fazer um filtro no stream para que tenha connection_id e lost_data
+            ExpressionAttributeNames: {
+                "#region_name": "region"
+            },
+            ReturnValues: "NONE"
+        }).promise();
+    } catch (error) {
+        if (error.name === "ConditionalCheckFailedException") {
+            console.log(`Machine ID ${machine_id} has no lost data`);
+        } else {
+            console.error("connect", error);
         }
     }
+
+
+    /*
+    const disconnection_time = connectedAt;
+    const ttl = new Date((disconnection_time + (2 * 60 * 60 * 1000) + (2 * 60 * 1000)) / 1000).getTime(); // 2hr + 2 minuto no máximo
+    await db.put({
+        TableName: ConnectDisconnectTableName,
+        Item: {
+            machine_id,
+            //connection_id_old: connection_id,
+            connection_id: connection_id,
+            //disconnection_time,
+            //connection_id_new: undefined,
+            //connection_time: undefined,
+            //lost_data: undefined,
+            ttl,
+            region
+        }
+    })
+    .promise();
+    */
+
+    /*
+    try {
+        await db.update({
+            TableName: ConnectDisconnectTableName,
+            Key: { machine_id },
+            ExpressionAttributeValues: { ":var1": connection_id, ":var2": connectedAt, ":var3": region },
+            UpdateExpression: `set connection_id_new=:var1, connection_time=:var2, #region_name=:var3`,
+            ConditionExpression: "attribute_exists(machine_id)",
+            ExpressionAttributeNames: {
+                "#region_name": "region"
+            },
+            ReturnValues: "NONE"
+        }).promise();
+        // Pegar o broadcast machine id list e enviar os trades pendentes.
+    } catch (error) {
+        if (error.name === "ConditionalCheckFailedException") {
+            console.log(`Machine ID ${machine_id} is not a reconection`);
+        } else {
+            console.error("connect", error);
+        }
+    }
+    */
 
     console.log(`Connected id ${connection_id} for Machine ID ${machine_id} product ${product_name} version ${replikanto_version}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
 
@@ -764,12 +825,14 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
 };
 
 functions.disconnect = async function(headers, paths, requestContext, body, db, isProd) {
+    //console.log(requestContext);
     const connection_id = requestContext.connectionId;
-
+    const connectedAt = requestContext.connectedAt;
     let machine_id = undefined;
     let region = undefined;
     let isLogged = false;
     // BEGIN Broadcast list disconnect
+    /*
     try {
         const data = await db.query({
             TableName: ConnectionTableName,
@@ -802,11 +865,11 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
                     console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
                     isLogged = true;
                 }
-                const disconnectStatusCode = requestContext.disconnectStatusCode;
-                const eventType = requestContext.eventType;
-                const disconnectReason = requestContext.disconnectReason;
+                //const disconnectStatusCode = requestContext.disconnectStatusCode;
+                //const eventType = requestContext.eventType;
+                //const disconnectReason = requestContext.disconnectReason;
                 if (disconnectStatusCode === 1001 && eventType === "DISCONNECT" && disconnectReason === "Going away") { // Reconnection flags
-                    const disconnection_time = new Date().getTime();
+                    const disconnection_time = connectedAt;
                     const ttl = new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(); // 1 minuto no máximo, a reconexão dura 1 segundo
                     await db.put({
                         TableName: ConnectDisconnectTableName,
@@ -816,6 +879,7 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
                             disconnection_time,
                             connection_id_new: undefined,
                             connection_time: undefined,
+                            lost_data: undefined,
                             ttl,
                             region
                         }
@@ -827,7 +891,79 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
     } catch (error) {
         console.error("disconnect", error);
     }
+    */
     // END Broadcast list disconnect
+
+    /*
+    const disconnection_time = new Date().getTime();
+    try {
+        await db.transactWrite({
+            TransactItems: [
+                {
+                    Put: {
+                        TableName: ConnectDisconnectTableName,
+                        Item: {
+                            machine_id,
+                            connection_id_old: connection_id,
+                            disconnection_time,
+                            connection_id_new: undefined,
+                            connection_time: undefined,
+                            lost_data: undefined,
+                            ttl: new Date((disconnection_time + (1 * 60 * 1000)) / 1000).getTime(), // 1 minuto no máximo, a reconexão dura 1 segundo
+                            region
+                        }
+                    }
+                },
+                {
+                    Delete: {
+                        TableName: ConnectionTableName,
+                        Key: {
+                            connection_id,
+                        }
+                    }
+                }
+            ]
+        }).promise();
+    } catch (error) {
+        console.error("disconnecting", connection_id, machine_id, region, error);
+    }
+    */
+    
+    /*
+    try {
+        const lost_data = [{
+            "time": new Date().getTime(),
+            "data": JSON.stringify({a:1})
+        }];
+
+        const dataHistory = await db.query({
+            TableName: ConnectionHistoryTableName,
+            ProjectionExpression: "machine_id, #region_name",
+            KeyConditionExpression: "connection_id = :val",
+            ExpressionAttributeValues: {
+                ":val": connection_id
+            },
+            ExpressionAttributeNames: {
+                "#region_name": "region"
+            }
+        }).promise();
+
+        await db.update({
+            TableName: ConnectDisconnectTableName,
+            Key: { machine_id: dataHistory.Items[0].machine_id },
+            ExpressionAttributeValues: { ":var1": lost_data, ':empty_list': [], ":var2": dataHistory.Items[0].region },
+            UpdateExpression: `set #lost_data = list_append(if_not_exists(#lost_data, :empty_list), :var1), #region_name = :var2`,
+            ExpressionAttributeNames: {
+                '#lost_data': 'lost_data',
+                "#region_name": "region"
+            },
+            ReturnValues: "NONE"
+        })
+        .promise();
+    } catch (error) {
+        console.log(error);
+    }
+    */
 
     await db
         .delete({
