@@ -481,19 +481,33 @@ async function BroadcastUpdatePositionInfo(db, broadcast_list_id, position, acco
     //const market_position       = position.market_position;
     //const quantity              = position.quantity;
     //const average_price         = position.average_price;
-    const { instrument, ...position_to_save} = position;
+    const { instrument, positionTime, ...position_to_save} = position;
 
+    let last_update = positionTime;
+    if (!last_update) {
+        last_update = new Date().getTime();
+    }
     //const account_name          = account.account_name;
     //const provider              = account.provider;
 
-    await db.update({
-        TableName: BroadcastPositionInfoTableName,
-        Key: { broadcast_list_id },
-        ExpressionAttributeNames: { '#instrument': instrument },
-        ExpressionAttributeValues: { ":var1": { ...position_to_save, ...account, last_update: new Date().getTime(), connected: true } },
-        UpdateExpression: `SET #instrument = :var1`,
-        ReturnValues: "NONE"
-    }).promise();
+    try {
+        await db.update({
+            TableName: BroadcastPositionInfoTableName,
+            Key: { broadcast_list_id },
+            ExpressionAttributeNames: { '#instrument': instrument },
+            ExpressionAttributeValues: { ":var1": { ...position_to_save, ...account, last_update, connected: true }, ":var2": last_update },
+            UpdateExpression: `SET #instrument = :var1`,
+            ConditionExpression: "attribute_not_exists(#instrument.last_update) or #instrument.last_update < :var2",
+            ReturnValues: "NONE"
+        }).promise();
+    } catch (error) {
+        const code = error["code"];
+        if (code === "ConditionalCheckFailedException") {
+            console.warn("Position Info Update", "last_update greater than", last_update, "position info: ", position);
+        } else {
+            console.error("Position Info Update", code ? code : error);
+        }
+    }
 }
 
 async function BroadcastDisconnectPositionInfo(db, broadcast_list_id, position) {
@@ -1105,6 +1119,10 @@ functions.positioninfo = async function(headers, paths, requestContext, body, db
         console.error(msgInfo);
         await SNSPublish("Position Info", msgInfo);
         return false;
+    }
+
+    if (!("positionTime" in body.position)) {
+        body.position.positionTime = requestContext.requestTimeEpoch;
     }
 
     const nodes                 = [...new Set(body.nodes)].filter(function (e) { return e != null; });
