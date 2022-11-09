@@ -126,7 +126,7 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
-        await SNSPublish("Send to Connection", `${connection_id}, ${e.code}, ${e.statusCode}`);
+        //await SNSPublish("Send to Connection", `${connection_id}, ${e.code}, ${e.statusCode}`);
         return {
             status: e.statusCode,
             statusText: e.code
@@ -403,12 +403,12 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             }
         }));
 
-        let broadcast_status = "not broadcast";
+        let broadcast_status = "not broadcast"; // se mudar aqui muda lá em baixo
         if (broadcast_promisses.length > 0) {
             console.log(`${FunctionName} broadcasting...`);
             await Promise.all(broadcast_promisses); 
             console.log(`${FunctionName} broadcast`);
-            broadcast_status = "broadcast";
+            broadcast_status = "broadcast"; // se mudar aqui muda lá em baixo
         }
         
         broadcast_list.map(async (node) => {
@@ -583,7 +583,16 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 promisses.push(promise);
             }
         } else {
-            nodes_retry.push(node);
+            // Somente se for nas versões antigas onde não tem conexão dupla de WS.
+            if (compareVersion(replikanto_version, 1, 5, 0, 0) < 0) {
+                nodes_retry.push(node);
+            } else {
+                nodes_status.push({
+                    node,
+                    status: "error",
+                    msg: `Invalid or disconnected node`
+                });
+            }
         }
     }
 
@@ -715,13 +724,30 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     });
 
     // Para quando for enviado para um remote id com várias conexões, não repetir o status de cada.
-    const node_status_reduced = nodes_status.reduce((acc, current) => {
-        const found = acc.find(item => (item.node === current.node && item.node === ECHO_ID));
-        if (!found)
-            return acc.concat([current]);
-        else
-            return acc;
-    }, []);
+    const unique_ids = [...new Set(nodes_status.map(o => o.node))].filter(function (e) { return e != null; });
+    const node_status_reduced = [];
+    for (let i = 0; i < unique_ids.length; i++) {
+        let found = false;
+        for (let e = 0; e < nodes_status.length; e++) {
+            let node_status_local = nodes_status[e];
+            if (node_status_local.node == unique_ids[i] && (node_status_local.status.startsWith("sent") || node_status_local.status === "broadcast")) {
+                found = true;
+                node_status_reduced.push(node_status_local);
+                break;
+            }
+        }
+        if (!found) {
+            let node = nodes_status.filter((n) => n.node === unique_ids[i] && (n.status === "error" || n.status === "not broadcast"))[0];
+            if (node === undefined) {
+                node = {
+                    node: unique_ids[i],
+                    status: "error",
+                    msg: "Invalid or disconnected node"
+                };
+            }
+            node_status_reduced.push(node);
+        }
+    }
 
     return {
         action: "node_status",
