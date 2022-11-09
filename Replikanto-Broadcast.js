@@ -134,8 +134,7 @@ exports.handler = async (event, context) => {
                 action,
                 payload,
                 replikanto_version,
-                broadcast_id,
-                broadcast_list_id
+                broadcast_id
             };
             const ret_obj = await sendToConnection(stage, connection_obj.connection_id, connection_obj.region, data_to_send);
             let ret = {
@@ -174,7 +173,7 @@ exports.handler = async (event, context) => {
                                     const machine_id = data.Items[0]["machine_id"];
                                     const lost_data = [{
                                         "time": new Date().getTime(),
-                                        "data": JSON.stringify(data_to_send)
+                                        "data": JSON.stringify({...data_to_send, ...{broadcast_list_id}})
                                     }];
                                     try {
                                         await dynamo.update({
