@@ -258,7 +258,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     //console.log('OnOrderUpdate', body);
 
     const trade = body.trade;
-    console.log("trade", trade);
+    //console.log("trade", trade);
 
     let nodes   = [...new Set(body.nodes)].filter(function (e) { return e != null; });
     console.log("nodes", nodes);
@@ -354,7 +354,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     const broadcast_list = nodes.filter(function(n) { return n.startsWith("@LST") });
     if (broadcast_list !== undefined && broadcast_list.length > 0) {
         let broadcast_promisses = [];
-        const FunctionName = 'Replikanto-Broadcast:' + (isProd ? "prod" : "dev");
+        const FunctionName = 'Replikanto-Broadcast';
         const slice_size = parseInt(BroadcastChuncks, 10);
         await Promise.all(broadcast_list.map(async (broadcast_list_id) => {
             let followersConnections = await FollowersConnectionBroadcastList(db, broadcast_list_id, machine_id);
@@ -375,9 +375,12 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 const connections_sliced = connections.slice(i, i+slice_size);
                 //console.log('Nodes connections:', connections_sliced);
                 console.log(`Slicing chunck ${i+1}-${Math.min(i+slice_size, connections.length)}`);
-                broadcast_promisses.push(lambda.invokeAsync({
+                var params = {
                     FunctionName,
-                    InvokeArgs: JSON.stringify({
+                    //ClientContext: 'STRING_VALUE',
+                    InvocationType: "Event",
+                    LogType: "None",
+                    Payload: JSON.stringify({
                         connections: connections_sliced,
                         action: "trade",
                         payload: trade,
@@ -385,8 +388,10 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                         broadcast_list_id,
                         broadcast_id,
                         requestContext
-                    })
-                }).promise());
+                    }),
+                    Qualifier: isProd ? "prod" : "dev"
+                };
+                broadcast_promisses.push(lambda.invoke(params).promise());
             }
             
             try {
@@ -426,9 +431,9 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             try {
                 let nodesToCalc = nodes.filter(item => item !== ECHO_ID);
                 let debitedCredit = nodesToCalc.length;
-                //if (broadcast_list.length > 0) {
-                    //debitedCredit += broacast_connections_count;
-                //}
+                if (broadcast_list.length > 0 && false) { // ainda não está cobrando os créditos
+                    debitedCredit += broacast_connections_count;
+                }
                 //console.log(debitedCredit);
                 //console.log('onorderupdate db.update 1');
                 let updateRet = await db.update({
