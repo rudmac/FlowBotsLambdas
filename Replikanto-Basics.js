@@ -9,13 +9,15 @@ const SNS = require('aws-sdk/clients/sns');
 const region = process.env.AWS_REGION;
 
 const dynamoDbConfig = new DynamoDB({
-    maxRetries: 5, // Delays with maxRetries = 5: 30, 60, 120, 240, 480, 920
+    maxRetries: 5, // Delays with maxRetries = 5: 50, 100, 300, 1200, 6000 = 4650 = 7,65s
     retryDelayOptions: {
-        base: 30
+        base: 50
     },
     httpOptions: {
-        timeout: 500
-    }
+        timeout: 1000 // 1s
+    },
+    region,
+    logger: console
 });
 
 const dynamo = new DynamoDB.DocumentClient({
@@ -1277,6 +1279,7 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
     let status = "active";
     let msg = "";
 
+    /*
     try {
         // Verificar quantos online tem
         const ttl_now = Math.floor(new Date().getTime() / 1000);
@@ -1339,6 +1342,7 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
         console.error("Error", "" + error);
         await SNSPublish("Active Machine ID", "" + error);
     }
+    */
 
     const nakedStr = machine_id + ":" + seed + ":" + status + ":" + interval;
 
@@ -1378,6 +1382,7 @@ functions.disabled_machine_id = async function(headers, paths, requestContext, b
         status: "disabled"
     };
 
+    /*
     try {
         const data = await db.query({
                 TableName: ActiveMachineIDTableName,
@@ -1432,6 +1437,7 @@ functions.disabled_machine_id = async function(headers, paths, requestContext, b
         console.error("Error", "" + error);
         await SNSPublish("Disable Machine ID", "" + error);
     }
+    */
 
     return {
         action: "disabled_machine_id",
