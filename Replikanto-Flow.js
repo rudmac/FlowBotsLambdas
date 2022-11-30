@@ -8,13 +8,15 @@ const SNS = require('aws-sdk/clients/sns');
 const region = process.env.AWS_REGION;
 
 const dynamoDbConfig = new DynamoDB({
-    maxRetries: 5, // Delays with maxRetries = 5: 30, 60, 120, 240, 480, 920
+    maxRetries: 5, // Delays with maxRetries = 5: 50, 100, 300, 1200, 6000 = 4650 = 7,65s
     retryDelayOptions: {
-        base: 30
+        base: 50
     },
     httpOptions: {
-        timeout: 500
-    }
+        timeout: 1000 // 1s
+    },
+    region,
+    logger: console
 });
 
 const dynamo = new DynamoDB.DocumentClient({
@@ -142,7 +144,7 @@ async function getConnetionID(db, node, myConnection) {
     var params = {
         TableName: ConnectionTableName,
         IndexName: "ReplikantoID",
-        ProjectionExpression: "connection_id, #region_name",
+        ProjectionExpression: "connection_id, #region_name, replikanto_version",
         KeyConditionExpression: "replikanto_id = :val",
         ExpressionAttributeValues: {
             ":val": node
@@ -417,7 +419,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         }
         
         broadcast_list.map(async (node) => {
-            nodes = arrayRemove(nodes, node);
+            nodes = arrayRemove(nodes, node); // Remove dos nodes as listas de broadcasts
             nodes_status.push({
                 node,
                 status: broadcast_status
@@ -431,7 +433,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             try {
                 let nodesToCalc = nodes.filter(item => item !== ECHO_ID);
                 let debitedCredit = nodesToCalc.length;
-                if (broadcast_list.length > 0 && false) { // ainda não está cobrando os créditos
+                if (broadcast_list.length > 0 && false) { // TODO ainda não está cobrando os créditos para a lista de broadcast
                     debitedCredit += broacast_connections_count;
                 }
                 //console.log(debitedCredit);
@@ -482,7 +484,6 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     }
 
     let promisses = [];
-    let overspend = 0;
     for (var i = 0; i < nodes.length; i++) {
         let node = nodes[i];
         try {
@@ -512,13 +513,10 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         const data = await getConnetionID(db, node, requestContext.connectionId);
         //console.log('my connection', data);
         
-        //console.log("items", items);
         if (data.Count > 0) {
-            if (node !== ECHO_ID) {
-                overspend = overspend + (data.Count - 1);
-            }
             const items = data.Items;
-            for (const item of items) { // Pode vir mais que 1 conexão, pois pode haver clone da VM e ter o mesmo machineID.
+            //console.log("items", items);
+            for (const item of items) { // Pode vir mais de 1 conexão, pois pode haver clone da VM e ter o mesmo machineID ou na versão 1.5 do Replikanto que tem 2 websocket sobrepostos.
                 let promise = new Promise(async (resolve, reject) => {
                     //console.log("item", item);
                     const connection_id = item.connection_id;
@@ -539,20 +537,23 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 node,
                                 status: 'sent'
                             });
-                        } else if (response.status === 403) { // Forbidden
-                            //console.log(response);
-                            resolve({
-                                node,
-                                status: "error",
-                                msg: response.statusText
-                            });
                         } else if (response.status === 410) { // GoneException
-                            // TODO Remove connection id from ConnectionRelation
-                            resolve({
-                                node,
-                                status: "error",
-                                msg: response.statusText
-                            });
+                            if (node !== ECHO_ID && compareVersion(item.replikanto_version, 1, 5, 0, 0) < 0) { // Somente se for nas versões antigas onde não tem conexão dupla de WS.
+                                nodes_retry.push(node);
+                                resolve({
+                                    node,
+                                    status: 'retry'
+                                });
+                            } else {
+                                if (node !== ECHO_ID) {
+                                    // TODO Remove connection id from ConnectionRelation
+                                }
+                                resolve({
+                                    node,
+                                    status: "error",
+                                    msg: response.statusText
+                                });
+                            }
                         } else if (response.status === 504) { // TIMEOUT
                             if (node !== ECHO_ID) {
                                 nodes_retry.push(node);
@@ -588,16 +589,8 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 promisses.push(promise);
             }
         } else {
-            // Somente se for nas versões antigas onde não tem conexão dupla de WS.
-            if (compareVersion(replikanto_version, 1, 5, 0, 0) < 0) {
-                nodes_retry.push(node);
-            } else {
-                nodes_status.push({
-                    node,
-                    status: "error",
-                    msg: `Invalid or disconnected node`
-                });
-            }
+            // vai tentar mais vezes pois não encontrol a conexão do seguidor
+            nodes_retry.push(node);
         }
     }
 
@@ -611,67 +604,24 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         //console.log(`Promise.all = ${r}`);
     }
 
-    if (overspend > 0 && 
-            credits > 0 && 
-            OrderStatesToCheck.includes(orderState) && 
-            compareVersion(replikanto_version, 1, 4, 1, 2) >= 0) { // Aqui é por causa dos safadinhos que tem VM clonada. Isso pode deixar de existir quando eu não deixar novas conexões com o mesmo id
-        
-        console.log(`${machine_id} overspend ${overspend} credits due to multiple Replikanto Remote ID connections`);
-        try {
-            let updateRet = await db.update({
-                TableName: MachineIDTableName,
-                Key: { machine_id },
-                ExpressionAttributeValues: { ":num": overspend },
-                UpdateExpression: "set credits = credits - :num",
-                ConditionExpression: "credits >= :num",
-                ReturnValues: "UPDATED_NEW"
-            }).promise();
-            //console.log(`Update credits`, updateRet);
-            credits = updateRet.Attributes.credits;
-            beforeCredit = credits + overspend;
-            hasCreditsChanged = true;
-        } catch (error) {
-            //ConditionalCheckFailedException tem que zerar
-            //console.log("Error", error);
-            if (error.hasOwnProperty("code")) {
-                if (error.code === "ConditionalCheckFailedException") {
-                    //console.log('onorderupdate db.update 2');
-                    let updateRet = await db.update({
-                        TableName: MachineIDTableName,
-                        Key: { machine_id },
-                        ExpressionAttributeValues: { ":num": 0 },
-                        UpdateExpression: "set credits = :num",
-                        ReturnValues: "UPDATED_OLD"
-                    }).promise();
-                    hasCreditsChanged = true;
-                    credits = 0;
-                    beforeCredit = updateRet.Attributes.credits;
-                }
-            }
-        }
-    }
-
     // Retry some nodes after first atempr
-    //console.log(`Retry nodes length ${nodes_retry.length}`);
     if (nodes_retry.length > 0) {
+        //console.log(`Retry nodes length ${nodes_retry.length}`);
         for (let retry = 0; retry < RetryTimes; retry ++) {
-            //console.log(`Retry number ${retry + 1}`);
+            console.log(`Retry number ${retry + 1}`);
+            //console.log(`Retry sleep ${RetryDelay * (retry + 1)}`);
+            await sleep(RetryDelay * (retry + 1));
+
             for (let i = nodes_retry.length - 1; i >= 0; i--) {
                 const node = nodes_retry[i];
-                //console.log(`Retry node ${node}`);
+                console.log(`Retry node ${node}`);
 
-                //console.log(`Retry sleep ${RetryDelay}`);
-                await sleep(RetryDelay);
-                
-                //console.log('onorderupdate getConnetionID 2');
                 const data = await getConnetionID(db, node, requestContext.connectionId);
                 if (data.Count > 0) {
                     const items = data.Items;
                     for (const item of items) {
                         const connection_id = item.connection_id;
                         if (requestContext.connectionId !== connection_id) {
-                            //console.log(`sendToConnection 2 = ${connection_id}`);
-                            //console.log('onorderupdate sendToConnection 2');
                             const response = await sendToConnection(requestContext, connection_id, item.region, {
                                 action: "trade",
                                 payload: trade,
@@ -682,17 +632,33 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                     node,
                                     status: `sent after ${retry + 1} retry(ies)`
                                 });
+                                
+                                //console.log(`Remove node ${node} from retry`);
+                                nodes_retry = nodes_retry.filter(function(value) { 
+                                    return value !== node;
+                                });
+                            } else if (response.status === 410) { // GoneException
+                                if (node !== ECHO_ID) {
+                                    // TODO Remove connection id from ConnectionRelation
+                                }
+                                nodes_status.push({
+                                    node,
+                                    status: "error",
+                                    msg: response.statusText
+                                });
+                                // Vai tentar mais vezes
                             } else {
                                 nodes_status.push({
                                     node,
                                     status: "error",
                                     msg: response.statusText
                                 });
+                                
+                                //console.log(`Remove node ${node} from retry`);
+                                nodes_retry = nodes_retry.filter(function(value) { 
+                                    return value !== node;
+                                });
                             }
-                            //console.log(`Remove node ${node} from retry`);
-                            nodes_retry = nodes_retry.filter(function(value) { 
-                                return value !== node;
-                            });
                         }
                     }
                 }
