@@ -118,13 +118,22 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
     const callbackAPI = new ApiGatewayManagementApi({
         apiVersion: '2018-11-29',
         endpoint: endpoint,
-        region: local_region
+        region: local_region,
+        maxRetries: 3, // Delays with maxRetries = 3: 50, 100, 300 = 450
+        retryDelayOptions: {
+            base: 50
+        },
+        httpOptions: {
+            timeout: 500 // 500ms
+        }
     });
 
     try {
+        console.log("call postToConnection");
         await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
+        console.log("finish postToConnection");
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);

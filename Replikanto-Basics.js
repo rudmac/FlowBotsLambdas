@@ -166,13 +166,22 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
     const callbackAPI = new ApiGatewayManagementApi({
         apiVersion: '2018-11-29',
         endpoint: endpoint,
-        region: local_region
+        region: local_region,
+        maxRetries: 3, // Delays with maxRetries = 3: 50, 100, 300 = 450
+        retryDelayOptions: {
+            base: 50
+        },
+        httpOptions: {
+            timeout: 500 // 500ms
+        }
     });
 
     try {
+        console.log("call postToConnection");
         await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
+        console.log("finish postToConnection");
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
@@ -735,17 +744,19 @@ functions.connect = async function(headers, paths, requestContext, body, db, isP
         })
         .promise();
 
-    let broadcast_list = await BroadcastList(db, machine_id);
-
     let broacast_list_log = [];
-    if (broadcast_list.length > 0) {
-        for (var i = 0; i < broadcast_list.length; i++) {
-            const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-            if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
-                console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-            } else {
-                //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
-                broacast_list_log.push(broadcast_list_id);
+    if (compareVersion(replikanto_version, 1, 5, 0, 0) >= 0) {
+        let broadcast_list = await BroadcastList(db, machine_id);
+
+        if (broadcast_list.length > 0) {
+            for (var i = 0; i < broadcast_list.length; i++) {
+                const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+                if (!await AddConnectionBroadcastList(db, broadcast_list_id, connection_id, region)) {
+                    console.error(`Unable to add connection id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+                } else {
+                    //console.log(`Connected id ${connection_id} to broadcast list id ${broadcast_list_id}`);
+                    broacast_list_log.push(broadcast_list_id);
+                }
             }
         }
     }
@@ -767,7 +778,7 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
     try {
         const data = await db.query({
             TableName: ConnectionTableName,
-            ProjectionExpression: "machine_id, #region_name",
+            ProjectionExpression: "machine_id, #region_name, replikanto_version",
             KeyConditionExpression: "connection_id = :val",
             ExpressionAttributeValues: {
                 ":val": connection_id
@@ -780,21 +791,24 @@ functions.disconnect = async function(headers, paths, requestContext, body, db, 
         if (data.Count > 0) {
             machine_id = data.Items[0].machine_id;
             region = data.Items[0].region;
+            let replikanto_version = data.Items[0].replikanto_version;
 
-            let broadcast_list = await BroadcastList(db, machine_id);
-            if (broadcast_list.length > 0) {
-                let broacast_list_log = [];
-                for (var i = 0; i < broadcast_list.length; i++) {
-                    const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-                    if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
-                        broacast_list_log.push(broadcast_list_id);
-                    } else {
-                        console.error(`Unable to disconnect id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast list ${broadcast_list_id}`);
+            if (compareVersion(replikanto_version, 1, 5, 0, 0) >= 0) {
+                let broadcast_list = await BroadcastList(db, machine_id);
+                if (broadcast_list.length > 0) {
+                    let broacast_list_log = [];
+                    for (var i = 0; i < broadcast_list.length; i++) {
+                        const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+                        if (await RemoveConnectionBroadcastList(broadcast_list_id, connection_id, region)) {
+                            broacast_list_log.push(broadcast_list_id);
+                        } else {
+                            console.error(`Unable to disconnect id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast list ${broadcast_list_id}`);
+                        }
                     }
-                }
-                if (broacast_list_log.length > 0) {
-                    console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
-                    isLogged = true;
+                    if (broacast_list_log.length > 0) {
+                        console.log(`Disconnected id ${connection_id} for Machine ID ${machine_id}, region ${region} and broadcast lists [${broacast_list_log.join(", ")}]`);
+                        isLogged = true;
+                    }
                 }
             }
         }
@@ -903,17 +917,20 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
         replikanto_id = data.Items[0].replikanto_id;
     }
 
-    // The same code as above is listed in change_machine_id method, if you change it here, please change it there
-    let broadcast_list = await BroadcastList(db, machine_id);
+    let broadcast_list = [];
+    if (compareVersion(replikanto_version, 1, 5, 0, 0) >= 0) {
+        // The same code as above is listed in change_machine_id method, if you change it here, please change it there
+        broadcast_list = await BroadcastList(db, machine_id);
 
-    for (var i = 0; i < broadcast_list.length; i++) {
-        const broadcast_list_id = broadcast_list[i].broadcast_list_id;
-        delete broadcast_list[i].broadcast_list_id;
+        for (var i = 0; i < broadcast_list.length; i++) {
+            const broadcast_list_id = broadcast_list[i].broadcast_list_id;
+            delete broadcast_list[i].broadcast_list_id;
 
-        const positions = await BroadcastGetPositionInfo(db, broadcast_list_id);
-        if (positions.length > 0) {
-            broadcast_list[i]["positions"] = positions[0];
-            delete broadcast_list[i].positions.broadcast_list_id;
+            const positions = await BroadcastGetPositionInfo(db, broadcast_list_id);
+            if (positions.length > 0) {
+                broadcast_list[i]["positions"] = positions[0];
+                delete broadcast_list[i].positions.broadcast_list_id;
+            }
         }
     }
 
@@ -1272,6 +1289,9 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
     } catch (error) {
         machine_id = CleanMachineID(headers["Machine-Id"]);
     }
+    
+    console.log("Active machine id " + machine_id);
+
     //console.log(headers);
     //console.log(requestContext);
     //console.log(body);
