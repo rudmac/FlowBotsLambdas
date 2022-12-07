@@ -4,6 +4,18 @@ const DynamoDB = require('aws-sdk/clients/dynamodb');
 const Lambda = require('aws-sdk/clients/lambda');
 const ApiGatewayManagementApi = require('aws-sdk/clients/apigatewaymanagementapi');
 const SNS = require('aws-sdk/clients/sns');
+const https = require('https');
+const agentDynamo = new https.Agent({
+    scheduling: 'fifo',
+    keepAlive: true,
+    timeout: 500
+});
+const agentApi = new https.Agent({
+    scheduling: 'fifo',
+    keepAlive: true,
+    maxSockets: Infinity,
+    timeout: 500
+});
 
 const region = process.env.AWS_REGION;
 
@@ -13,7 +25,8 @@ const dynamoDbConfig = new DynamoDB({
         base: 50
     },
     httpOptions: {
-        timeout: 1000 // 1s
+        agent: agentDynamo,
+        timeout: 500 // 0.5s
     },
     region,
     logger: console
@@ -119,13 +132,16 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
         apiVersion: '2018-11-29',
         endpoint: endpoint,
         region: local_region,
-        maxRetries: 3, // Delays with maxRetries = 3: 50, 100, 300 = 450
+        maxRetries: 5, // Delays with maxRetries = 5: 50, 100, 300, 1200, 6000 = 4650 = 7,65s
         retryDelayOptions: {
             base: 50
         },
         httpOptions: {
+            agent: agentApi,
+            connectTimeout: 500,
             timeout: 500 // 500ms
-        }
+        },
+        logger: console
     });
 
     try {
@@ -744,6 +760,7 @@ exports.handler = async (event, context) => {
     try {
         //console.log(event);
         //console.log(context);
+        context.callbackWaitsForEmptyEventLoop = false;
         
         const headers = event.headers;
         const paths = event.paths;
