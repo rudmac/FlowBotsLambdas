@@ -145,11 +145,11 @@ async function sendToConnection(requestContext, connection_id, local_region, dat
     });
 
     try {
-        console.log("call postToConnection");
+        //console.log("call postToConnection");
         await callbackAPI
             .postToConnection({ ConnectionId: connection_id, Data: JSON.stringify(data) })
             .promise();
-        console.log("finish postToConnection");
+        //console.log("finish postToConnection");
         return { status: 200 };
     } catch (e) {
         console.error(connection_id, e.code, e.statusCode);
@@ -483,7 +483,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 hasCreditsChanged = true;
             } catch (error) {
                 //ConditionalCheckFailedException tem que zerar
-                //console.log("Error", error);
+                console.error(error);
                 
                 hasCreditsChanged = false;
                 credits = 0;
@@ -535,10 +535,19 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
         //console.log(`getConnetionID`);
         //console.log('onorderupdate getConnetionID 1');
         //console.log('my connection', requestContext.connectionId);
-        const data = await getConnetionID(db, node, requestContext.connectionId);
+        let data = {
+            Count: 0
+        };
+        try {
+            data = await getConnetionID(db, node, requestContext.connectionId);
+        } catch (error) {
+            console.error("getConnetionID", error.code);
+            // vai pro retry
+        }
         //console.log('my connection', data);
         
         if (data.Count > 0) {
+            console.log(`${node} connection ID found.`);
             const items = data.Items;
             //console.log("items", items);
             for (const item of items) { // Pode vir mais de 1 conexão, pois pode haver clone da VM e ter o mesmo machineID ou na versão 1.5 do Replikanto que tem 2 websocket sobrepostos.
@@ -576,10 +585,10 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 resolve({
                                     node,
                                     status: "error",
-                                    msg: response.statusText
+                                    msg: "Invalid or disconnected node"
                                 });
                             }
-                        } else if (response.status === 504) { // TIMEOUT
+                        } else if (response.status === 504 || response.statusText === "TimeoutError") { // TIMEOUT
                             if (node !== ECHO_ID) {
                                 nodes_retry.push(node);
                                 resolve({
@@ -590,7 +599,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 resolve({
                                     node,
                                     status: "error",
-                                    msg: response.statusText
+                                    msg: "Invalid or disconnected node"
                                 });
                             }
                         } else {
@@ -615,6 +624,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             }
         } else {
             // vai tentar mais vezes pois não encontrol a conexão do seguidor
+            console.log(`${node} connection ID not found.`);
             nodes_retry.push(node);
         }
     }
@@ -633,7 +643,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
     if (nodes_retry.length > 0) {
         //console.log(`Retry nodes length ${nodes_retry.length}`);
         for (let retry = 0; retry < RetryTimes; retry ++) {
-            console.log(`Retry number ${retry + 1}`);
+            console.log(`Retry number ${retry + 1}. Sleeping ${RetryDelay * (retry + 1)}ms before trying again.`);
             //console.log(`Retry sleep ${RetryDelay * (retry + 1)}`);
             await sleep(RetryDelay * (retry + 1));
 
@@ -643,6 +653,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
 
                 const data = await getConnetionID(db, node, requestContext.connectionId);
                 if (data.Count > 0) {
+                    console.log(`${node} connection ID found.`);
                     const items = data.Items;
                     for (const item of items) {
                         const connection_id = item.connection_id;
@@ -652,6 +663,7 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 payload: trade,
                                 replikanto_version
                             }, node === ECHO_ID);
+                            console.log("Response:", response);
                             if (response.status === 200) {
                                 nodes_status.push({
                                     node,
@@ -669,14 +681,21 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                                 nodes_status.push({
                                     node,
                                     status: "error",
-                                    msg: response.statusText
+                                    msg: "Invalid or disconnected node"
+                                });
+                                // Vai tentar mais vezes
+                            } else if (response.status === 504 || response.statusText === "TimeoutError") { // TIMEOUT
+                                nodes_status.push({
+                                    node,
+                                    status: "error",
+                                    msg: "Invalid or disconnected node"
                                 });
                                 // Vai tentar mais vezes
                             } else {
                                 nodes_status.push({
                                     node,
                                     status: "error",
-                                    msg: response.statusText
+                                    msg: "Invalid or disconnected node"
                                 });
                                 
                                 //console.log(`Remove node ${node} from retry`);
@@ -686,6 +705,8 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                             }
                         }
                     }
+                } else {
+                    console.log("Connection ID not found.");
                 }
             }
             
@@ -701,24 +722,12 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
                 nodes_status.push({
                     node,
                     status: "error",
-                    msg: `Invalid or disconnected node`
+                    msg: "Invalid or disconnected node"
                 });
             }
         }
     }
     
-    console.log(isProd ? "prod_log" : "dev_log", {
-        trade,
-        account,
-        credits,
-        machine_id,
-        replikanto_id,
-        replikanto_version,
-        //nodes,
-        nodes_status,
-        elapsed_time: new Date() - Date.parse(trade.timeUTC)
-    });
-
     // Para quando for enviado para um remote id com várias conexões, não repetir o status de cada.
     const unique_ids = [...new Set(nodes_status.map(o => o.node))].filter(function (e) { return e != null; });
     const node_status_reduced = [];
@@ -744,6 +753,18 @@ functions.onorderupdate = async function(headers, paths, requestContext, body, d
             node_status_reduced.push(node);
         }
     }
+
+    console.log(isProd ? "prod_log" : "dev_log", {
+        trade,
+        account,
+        credits,
+        machine_id,
+        replikanto_id,
+        replikanto_version,
+        //nodes,
+        nodes_status: node_status_reduced,
+        elapsed_time: new Date() - Date.parse(trade.timeUTC)
+    });
 
     return {
         action: "node_status",

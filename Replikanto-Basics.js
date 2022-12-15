@@ -651,6 +651,27 @@ async function SNSPublish(subject, msg) {
     }).promise();
 }
 
+function TimeoutPromise(timeout, callback) {
+    return new Promise((resolve, reject) => {
+        // Set up the timeout
+        const timer = setTimeout(() => {
+            reject(new Error(`Promise timed out after ${timeout} ms`));
+        }, timeout);
+
+        // Set up the real work
+        callback(
+            (value) => {
+                clearTimeout(timer);
+                resolve(value);
+            },
+            (error) => {
+                clearTimeout(timer);
+                reject(error);
+            }
+        );
+    });
+}
+
 var functions = [];
 
 functions.connect = async function(headers, paths, requestContext, body, db, isProd) {
@@ -866,7 +887,7 @@ functions.nodeinfo = async function(headers, paths, requestContext, body, db, is
     } catch (error) {
         const msgInfo = `Unsigned Machine ID ${body.machine_id} for version ${replikanto_version}, Replikanto ID = CONTACT-SUPPORT`;
         console.warn(msgInfo);
-        await SNSPublish("Node Info", msgInfo);
+        //await SNSPublish("Node Info", msgInfo);
         //const assigned_machine_id_data = await UnassignedMachineIdRelation(db, machine_id);
         //if (assigned_machine_id_data !== false && assigned_machine_id_data.Items[0].machine_id !== machine_id) {
             return {
@@ -1316,70 +1337,86 @@ functions.active_machine_id = async function(headers, paths, requestContext, bod
     let status = "active";
     let msg = "";
 
-    /*
     try {
-        // Verificar quantos online tem
-        const ttl_now = Math.floor(new Date().getTime() / 1000);
-        const data = await db.query({
-                TableName: ActiveMachineIDTableName,
-                IndexName: "MachineID",
-                ProjectionExpression: "id, ip, #ttl_name",
-                KeyConditionExpression: "machine_id = :val1",
-                FilterExpression: "#ttl_name > :val2 AND ip <> :val3",
-                ExpressionAttributeValues: {
-                    ":val1": machine_id,
-                    ":val2": ttl_now,
-                    ":val3": ip
-                },
-                ExpressionAttributeNames: {
-                    "#ttl_name": "ttl"
-                }
-            }).promise();
-        if (data.Count > 0) {
-            const msgInfo = `Unable to activate machine id ${machine_id}. There are ${data.Count} instance(s) already opened.`;
-            console.warn(msgInfo);
-            await SNSPublish("Active Machine ID", msgInfo);
-            
-            if (is_assigned_machine_id) { // target only assigned machine ids
-                status = "invalid";
-                //msg = "You already have another Replikanto running with the same machine id. To use Replikanto, close all Ninjatraders with the same machine id and reopen this one. You can ask for help by email {0}.";
-                msg = "This product is licensed for use on a single computer only, another Replikanto is already activated with this machine id. To be able to use it, close all others. You can ask for help by email {0}.";
-            } else {
-                // esse aqui em baixo depois será removido e as linhas acima descomentadas.
-                await db
-                    .put({
+        let result = await TimeoutPromise(2000, async(resolve, reject) => {
+            try {
+                // Verificar quantos online tem
+                const ttl_now = Math.floor(new Date().getTime() / 1000);
+                const data = await db.query({
                         TableName: ActiveMachineIDTableName,
-                        Item: {
-                            id: seed,
-                            machine_id,
-                            ttl,
-                            ip,
-                            has_duplicates: true
+                        IndexName: "MachineID",
+                        ProjectionExpression: "id, ip, #ttl_name",
+                        KeyConditionExpression: "machine_id = :val1",
+                        FilterExpression: "#ttl_name > :val2 AND ip <> :val3",
+                        ExpressionAttributeValues: {
+                            ":val1": machine_id,
+                            ":val2": ttl_now,
+                            ":val3": ip
+                        },
+                        ExpressionAttributeNames: {
+                            "#ttl_name": "ttl"
                         }
-                    })
-                    .promise();
-            }
-        } else {
-            console.log(`Activate machine id ${machine_id}`);
-            // atualizar com mais um
-            await db
-                .put({
-                    TableName: ActiveMachineIDTableName,
-                    Item: {
-                        id: seed,
-                        machine_id,
-                        ttl,
-                        ip
+                    }).promise();
+                if (data.Count > 0) {
+                    const msgInfo = `Unable to activate machine id ${machine_id}. There are ${data.Count} instance(s) already opened.`;
+                    console.warn(msgInfo);
+                    //await SNSPublish("Active Machine ID", msgInfo);
+                    
+                    if (is_assigned_machine_id) { // target only assigned machine ids
+                        resolve({
+                            status: "invalid",
+                            msg: "This product is licensed for use on a single computer only, another Replikanto is already activated with this machine id. To be able to use it, close all others. You can ask for help by email {0}."
+                        });
+                    } else {
+                        // esse aqui em baixo depois será removido e as linhas acima descomentadas.
+                        await db
+                            .put({
+                                TableName: ActiveMachineIDTableName,
+                                Item: {
+                                    id: seed,
+                                    machine_id,
+                                    ttl,
+                                    ip,
+                                    has_duplicates: true
+                                }
+                            })
+                            .promise();
+                        resolve({
+                            status: "active",
+                            msg: ""
+                        });
                     }
-                })
-                .promise();
+                } else {
+                    // atualizar com mais um
+                    await db
+                        .put({
+                            TableName: ActiveMachineIDTableName,
+                            Item: {
+                                id: seed,
+                                machine_id,
+                                ttl,
+                                ip
+                            }
+                        })
+                        .promise();
+                    resolve({
+                        status: "active",
+                        msg: ""
+                    });
+                }
+            } catch (error) {
+                reject("Unable to update the machine id "+machine_id+" from the active machine id table", error);
+            }
+        }).catch(e => {
+            console.error(e.message);
+        });
+        if (result && "status" in result) {
+            status = result.status;
+            msg = result.msg;
         }
     } catch (error) {
-        console.error("Unable to update the active machine id table");
-        console.error("Error", "" + error);
-        await SNSPublish("Active Machine ID", "" + error);
+        console.error(error);
     }
-    */
 
     const nakedStr = machine_id + ":" + seed + ":" + status + ":" + interval;
 
@@ -1419,62 +1456,70 @@ functions.disabled_machine_id = async function(headers, paths, requestContext, b
         status: "disabled"
     };
 
-    /*
     try {
-        const data = await db.query({
-                TableName: ActiveMachineIDTableName,
-                IndexName: "MachineID",
-                ProjectionExpression: "id, #ttl_name",
-                KeyConditionExpression: "machine_id = :val1",
-                ExpressionAttributeValues: {
-                    ":val1": machine_id
-                },
-                ExpressionAttributeNames: {
-                    "#ttl_name": "ttl"
-                }
-            }).promise();
-        if (data.Count > 0) {
-            const sort_itens = data.Items.sort(function(a, b) {
-                let ttl_a = a.ttl, ttl_b = b.ttl;
-                return ((ttl_a < ttl_b) ? -1 : ((ttl_a > ttl_b) ? 1 : 0));
-            });
-            
-            const hash = headers["hash"];
-            if (hash !== undefined) {
-                for (let i = data.Count -1; i >= 0; i--) {
-                    const last_item = sort_itens[i];
-                    const nakedStr = `${machine_id}:${last_item.id}`;
-                    const toCheck = crypto.createHmac("sha256", MD5Key).update(nakedStr).digest("hex");
-                    if (toCheck === hash) {
-                        await db.delete({
+        await TimeoutPromise(2000, async(resolve, reject) => {
+            try {
+                const data = await db.query({
+                        TableName: ActiveMachineIDTableName,
+                        IndexName: "MachineID",
+                        ProjectionExpression: "id, #ttl_name",
+                        KeyConditionExpression: "machine_id = :val1",
+                        ExpressionAttributeValues: {
+                            ":val1": machine_id
+                        },
+                        ExpressionAttributeNames: {
+                            "#ttl_name": "ttl"
+                        }
+                    }).promise();
+                if (data.Count > 0) {
+                    const sort_itens = data.Items.sort(function(a, b) {
+                        let ttl_a = a.ttl, ttl_b = b.ttl;
+                        return ((ttl_a < ttl_b) ? -1 : ((ttl_a > ttl_b) ? 1 : 0));
+                    });
+                    
+                    const hash = headers["hash"];
+                    if (hash !== undefined) {
+                        for (let i = data.Count -1; i >= 0; i--) {
+                            const last_item = sort_itens[i];
+                            const nakedStr = `${machine_id}:${last_item.id}`;
+                            const toCheck = crypto.createHmac("sha256", MD5Key).update(nakedStr).digest("hex");
+                            if (toCheck === hash) {
+                                await db.delete({
+                                        TableName: ActiveMachineIDTableName,
+                                        Key: { id : last_item.id }
+                                    }).promise();
+                                resolve();
+                            }
+                        }
+                        reject("Invalid hash");
+                    } else {
+                        if (compareVersion(replikanto_version, 1, 4, 1, 1) < 0) {
+                            const last_item = sort_itens[data.Count -1];
+                            await db.delete({
                                 TableName: ActiveMachineIDTableName,
                                 Key: { id : last_item.id }
                             }).promise();
-                        break;
+                            resolve();
+                        } else {
+                            // TODO aqui pode ser pelo o IP tbm, em último caso 
+                            
+                            // aqui estão querendo hackear
+                            //throw "Missing the hash";
+                            reject("Missing the hash");
+                        }
                     }
-                }
-            } else {
-                if (compareVersion(replikanto_version, 1, 4, 1, 1) < 0) {
-                    const last_item = sort_itens[data.Count -1];
-                    await db.delete({
-                        TableName: ActiveMachineIDTableName,
-                        Key: { id : last_item.id }
-                    }).promise();
                 } else {
-                    // TODO aqui pode ser pelo o IP tbm, em último caso 
-                     
-                    // aqui estão querendo hackear
-                    throw "Missing the hash";
+                    resolve();
                 }
+            } catch (error) {
+                reject("Unable to delete the machine id "+machine_id+" from the active machine id table", error);
             }
-        }
-
+        }).catch(e => {
+            console.error(e.message);
+        });
     } catch (error) {
-        console.error("Unable to delete the active machine id table");
-        console.error("Error", "" + error);
-        await SNSPublish("Disable Machine ID", "" + error);
+        console.error(error);
     }
-    */
 
     return {
         action: "disabled_machine_id",
